@@ -1,0 +1,105 @@
+# Agent inventory + governance envelope.
+#
+# This file is the control plane's statement of *intent*. Events are what
+# actually happened; policy findings are the difference between the two.
+#
+# Access scope is ALWAYS two fields — a mode and a list:
+#
+#   tool_access_mode: unrestricted          # everything allowed; no list permitted
+#   tool_access_mode: allowlist             # only what is listed
+#   allowed_tools: [a, b]
+#   tool_access_mode: allowlist             # empty list = deny all tools
+#   allowed_tools: []
+#
+# An empty list has no security meaning on its own. Deleting the last entry from
+# an allowlist must not silently grant the world. Same rules for
+# data_access_mode / allowed_data_domains.
+
+agents:
+  - agent_id: agt_forecast_weekly
+    name: Weekly Sales Forecast Agent
+    platform: local
+    owner: analytics-platform@contoso.com
+    description: >
+      Produces the Monday weekly sales forecast, investigates anomalies and
+      drafts a report. Reads only; publishing is a separate, gated agent.
+    tags: [production, forecasting]
+    governance:
+      access_mode: read_only
+      tool_access_mode: allowlist
+      allowed_tools:
+        - sales.query_history
+        - promotions.get_calendar
+        - weather.get_forecast
+        - forecast.run_model
+        - inventory.read_stock_levels
+        - reporting.render_draft
+      data_access_mode: allowlist
+      allowed_data_domains: [sales, marketing, weather, inventory, reporting]
+      max_cost_usd: 2.50
+      # A healthy run makes 5-6 tool calls; 12 leaves room for a retry or two
+      # while still catching a loop. A ceiling far above normal usage is not a
+      # guardrail, it is decoration.
+      max_tool_calls: 12
+
+  - agent_id: agt_inventory_investigator
+    name: Inventory Investigator Agent
+    platform: local
+    owner: supply-chain@contoso.com
+    description: >
+      Invoked by other agents to explain demand anomalies against stock and
+      shipment data. Read-only by design; it recommends, it does not adjust.
+    tags: [production, supply-chain]
+    governance:
+      access_mode: read_only
+      tool_access_mode: allowlist
+      allowed_tools:
+        - inventory.read_stock_levels
+        - inventory.read_shipments
+      data_access_mode: allowlist
+      allowed_data_domains: [inventory, logistics]
+      max_cost_usd: 1.00
+      max_tool_calls: 12
+
+  - agent_id: agt_report_publisher
+    name: Report Publisher Agent
+    platform: local
+    owner: analytics-platform@contoso.com
+    description: >
+      The only agent permitted to publish. Every write needs a linked human
+      approval event.
+    tags: [production, publishing]
+    governance:
+      access_mode: read_write
+      tool_access_mode: allowlist
+      allowed_tools:
+        - reporting.publish
+      data_access_mode: allowlist
+      allowed_data_domains: [reporting]
+      max_cost_usd: 0.50
+      max_tool_calls: 5
+      approval_required_actions: [write]
+
+  - agent_id: agt_analyst_copilot
+    name: Analyst Copilot
+    platform: mcp
+    owner: analytics-platform@contoso.com
+    description: >
+      Interactive copilot used by analysts through the MCP gateway. Broad read
+      access, tight spend ceiling because usage is ad hoc.
+    tags: [interactive]
+    governance:
+      access_mode: read_only
+      tool_access_mode: allowlist
+      allowed_tools:
+        - sales.query_history
+        - promotions.get_calendar
+        - inventory.read_stock_levels
+        - forecast.run_model
+      data_access_mode: allowlist
+      allowed_data_domains: [sales, marketing, inventory, reporting]
+      max_cost_usd: 0.75
+      max_tool_calls: 15
+
+# NOTE: agt_pricing_experiment is deliberately absent. It appears in the
+# synthetic data so the unregistered_agent rule has something to find.

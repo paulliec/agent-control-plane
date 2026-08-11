@@ -1,0 +1,88 @@
+# Tool inventory.
+#
+# `is_mutating` is the important column: it lets the read-only rule fire on a
+# tool's real capability rather than on whatever the agent claimed it was doing.
+
+tools:
+  - tool_name: sales.query_history
+    display_name: Query sales history
+    platform: mcp
+    server: snowflake-mcp
+    description: Reads historical order facts for a lookback window.
+    data_domains: [sales]
+    downstream_systems: [snowflake]
+
+  - tool_name: promotions.get_calendar
+    display_name: Promotion calendar
+    platform: mcp
+    server: snowflake-mcp
+    description: Reads planned and historical promotions.
+    data_domains: [marketing]
+    downstream_systems: [snowflake]
+
+  - tool_name: weather.get_forecast
+    display_name: Weather forecast
+    platform: mcp
+    server: weather-mcp
+    description: Regional forecast used as a demand covariate.
+    data_domains: [weather]
+    downstream_systems: ["api.weather.gov"]
+
+  - tool_name: forecast.run_model
+    display_name: Run forecast model
+    platform: local
+    description: Executes the weekly demand model. Compute only, no persistence.
+    data_domains: [sales]
+
+  - tool_name: inventory.read_stock_levels
+    display_name: Read stock levels
+    platform: mcp
+    server: inventory-mcp
+    description: Current on-hand stock by SKU and location.
+    data_domains: [inventory]
+    downstream_systems: [erp]
+
+  - tool_name: inventory.read_shipments
+    display_name: Read inbound shipments
+    platform: mcp
+    server: inventory-mcp
+    description: Inbound shipment status. Known to rate-limit under load.
+    data_domains: [logistics]
+    downstream_systems: [erp]
+    tags: [flaky]
+
+  - tool_name: inventory.adjust_stock
+    display_name: Adjust stock levels
+    platform: mcp
+    server: inventory-mcp
+    description: Writes stock corrections back to the ERP.
+    is_mutating: true
+    requires_approval: true
+    data_domains: [inventory]
+    downstream_systems: [erp]
+    tags: [privileged]
+
+  - tool_name: reporting.render_draft
+    display_name: Render report draft
+    platform: local
+    description: Renders the forecast narrative to a draft artifact.
+    data_domains: [reporting]
+
+  - tool_name: reporting.publish
+    display_name: Publish report
+    platform: mcp
+    server: reporting-mcp
+    description: Publishes the weekly forecast to the business.
+    is_mutating: true
+    requires_approval: true
+    data_domains: [reporting]
+    tags: [privileged]
+
+  - tool_name: hr.query_headcount
+    display_name: Query store headcount
+    platform: mcp
+    server: snowflake-mcp
+    description: Store staffing levels. Restricted domain.
+    data_domains: [hr]
+    downstream_systems: [snowflake]
+    tags: [restricted]
