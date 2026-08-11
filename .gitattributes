@@ -1,0 +1,9 @@
+# Normalise line endings in the repo; check out native on Windows.
+* text=auto
+
+*.py    text diff=python
+*.md    text
+*.yaml  text
+*.yml   text
+*.toml  text
+*.jsonl text
