@@ -46,6 +46,16 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+# Coverage lives here rather than in pytest addopts so a plain `pytest` stays
+# fast and ungated; CI opts in with `pytest --cov`. Floor sits just under the
+# current 96.87% so a fractional shift doesn't fail the build spuriously.
+[tool.coverage.run]
+source = ["agent_control_plane"]
+
+[tool.coverage.report]
+fail_under = 96
+show_missing = true
+
 [tool.mypy]
 python_version = "3.12"
 # Tests and scripts are checked too: a fixture with a wrong type is how a test
