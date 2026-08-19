@@ -1,4 +1,4 @@
-"""Explicit configuration. Every path is overridable via env (AGENTOPS_*)."""
+"""Explicit configuration. Every path is overridable via env (ACP_*)."""
 
 from __future__ import annotations
 
@@ -7,19 +7,25 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# src/agentops/config.py -> repo root
+from agent_control_plane.constants import DEFAULT_TENANT_ID
+
+# src/agent_control_plane/config.py -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="AGENTOPS_",
+        env_prefix="ACP_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    db_path: Path = Field(default=REPO_ROOT / "data" / "agentops.db")
+    # One control plane instance serves one tenant. A future admin surface
+    # constructs several; nothing assumes there is only ever one.
+    tenant_id: str = DEFAULT_TENANT_ID
+
+    db_path: Path = Field(default=REPO_ROOT / "data" / "agent_control_plane.db")
     registry_dir: Path = Field(default=REPO_ROOT / "config")
     data_dir: Path = Field(default=REPO_ROOT / "data")
 
@@ -40,6 +46,10 @@ class Settings(BaseSettings):
     @property
     def tools_file(self) -> Path:
         return self.registry_dir / "tools.yaml"
+
+    @property
+    def data_domains_file(self) -> Path:
+        return self.registry_dir / "data_domains.yaml"
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

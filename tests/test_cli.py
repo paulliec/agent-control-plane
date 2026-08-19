@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from agentops.cli import main
-from agentops.config import REPO_ROOT
+from agent_control_plane.cli import main
+from agent_control_plane.config import REPO_ROOT
 
 SAMPLE_LOG = REPO_ROOT / "data" / "samples" / "mcp_tool_calls.jsonl"
 

@@ -3,6 +3,10 @@
 One place where concrete implementations are chosen and wired. The CLI, the
 dashboard and the tests all call `build_control_plane`; nothing else constructs
 a repository or an engine directly.
+
+A `ControlPlane` serves exactly one tenant. Serving several means building
+several — which is deliberate, because it makes cross-tenant access an explicit
+act rather than a forgotten filter.
 """
 
 from __future__ import annotations
@@ -10,20 +14,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentops.config import Settings, load_settings
-from agentops.models.agent import AgentGovernance
-from agentops.registry import Registry, load_registry
-from agentops.repositories.base import ControlPlaneRepository
-from agentops.repositories.sqlite import SQLiteRepository
-from agentops.services.analytics import AnalyticsService
-from agentops.services.ingestion import IngestionService
-from agentops.services.policy_engine import PolicyContext, PolicyEngine, PolicyRule
-from agentops.services.policy_rules import default_rules
+from agent_control_plane.config import Settings, load_settings
+from agent_control_plane.models.agent import AgentGovernance
+from agent_control_plane.registry import Registry, load_registry
+from agent_control_plane.repositories.base import ControlPlaneRepository
+from agent_control_plane.repositories.sqlite import SQLiteRepository
+from agent_control_plane.services.analytics import AnalyticsService
+from agent_control_plane.services.ingestion import IngestionService
+from agent_control_plane.services.policy_engine import (
+    PolicyContext,
+    PolicyEngine,
+    PolicyRule,
+)
+from agent_control_plane.services.policy_rules import default_rules
 
 
 @dataclass(frozen=True, slots=True)
 class ControlPlane:
     settings: Settings
+    tenant_id: str
     registry: Registry
     repository: ControlPlaneRepository
     engine: PolicyEngine
@@ -45,15 +54,26 @@ def build_control_plane(
     settings: Settings | None = None,
     *,
     db_path: Path | str | None = None,
+    tenant_id: str | None = None,
     rules: list[PolicyRule] | None = None,
     repository: ControlPlaneRepository | None = None,
 ) -> ControlPlane:
     settings = settings or load_settings()
+    updates: dict[str, object] = {}
     if db_path is not None:
-        settings = settings.model_copy(update={"db_path": Path(db_path)})
+        updates["db_path"] = Path(db_path)
+    if tenant_id is not None:
+        updates["tenant_id"] = tenant_id
+    if updates:
+        settings = settings.model_copy(update=updates)
     settings.ensure_dirs()
 
-    registry = load_registry(settings.agents_file, settings.tools_file)
+    registry = load_registry(
+        settings.agents_file,
+        settings.tools_file,
+        settings.data_domains_file,
+        tenant_id=settings.tenant_id,
+    )
 
     repo = repository or SQLiteRepository(settings.db_path)
     repo.initialise()
@@ -68,12 +88,16 @@ def build_control_plane(
 
     return ControlPlane(
         settings=settings,
+        tenant_id=settings.tenant_id,
         registry=registry,
         repository=repo,
         engine=engine,
         policy_context=context,
         ingestion=IngestionService(
-            repository=repo, engine=engine, policy_context=context
+            repository=repo,
+            engine=engine,
+            policy_context=context,
+            tenant_id=settings.tenant_id,
         ),
-        analytics=AnalyticsService(repo),
+        analytics=AnalyticsService(repo, settings.tenant_id),
     )

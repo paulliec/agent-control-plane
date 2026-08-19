@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentops.models.enums import Platform
+from agent_control_plane.constants import DEFAULT_TENANT_ID
+from agent_control_plane.models.enums import Platform
 
 
 class Tool(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    tenant_id: str = DEFAULT_TENANT_ID
     tool_name: str = Field(min_length=1, max_length=200)
     display_name: str | None = None
     platform: Platform = Platform.MCP

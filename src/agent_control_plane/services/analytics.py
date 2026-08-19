@@ -9,14 +9,14 @@ docs/ARCHITECTURE.md for when to push it down.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 
-from agentops.models.enums import EventType, Severity, Status
-from agentops.models.event import AgentEvent, ExecutionChain, build_chain
-from agentops.models.policy import PolicyResult
-from agentops.repositories.base import ControlPlaneRepository
+from agent_control_plane.models.enums import EventType, Severity, Status
+from agent_control_plane.models.event import AgentEvent, ExecutionChain, build_chain
+from agent_control_plane.models.policy import PolicyResult
+from agent_control_plane.repositories.base import ControlPlaneRepository
 
 _FAILED_STATUSES = (Status.FAILURE, Status.DENIED, Status.TIMEOUT)
 
@@ -77,25 +77,36 @@ class AgentCost:
 
 
 class AnalyticsService:
-    def __init__(self, repository: ControlPlaneRepository) -> None:
+    """Read-side aggregates for exactly one tenant.
+
+    The tenant is fixed at construction rather than passed per call: every
+    aggregate here is a *summary*, and a summary that silently spans tenants is
+    the specific failure this design exists to prevent.
+    """
+
+    def __init__(self, repository: ControlPlaneRepository, tenant_id: str) -> None:
         self.repository = repository
+        self.tenant_id = tenant_id
 
     # -- primitives -------------------------------------------------------
 
     def _events(self) -> list[AgentEvent]:
-        return self.repository.list_events()
+        return self.repository.list_events(self.tenant_id)
 
     def _violations(self) -> list[PolicyResult]:
-        return self.repository.list_policy_results(violations_only=True)
+        return self.repository.list_policy_results(self.tenant_id, violations_only=True)
 
     def chains(self) -> list[ExecutionChain]:
         by_run: dict[str, list[AgentEvent]] = {}
         for event in self._events():
             by_run.setdefault(event.correlation_id, []).append(event)
-        return [build_chain(cid, events) for cid, events in by_run.items()]
+        return [
+            build_chain(cid, events, tenant_id=self.tenant_id)
+            for cid, events in by_run.items()
+        ]
 
     def chain(self, correlation_id: str) -> ExecutionChain | None:
-        return self.repository.get_chain(correlation_id)
+        return self.repository.get_chain(self.tenant_id, correlation_id)
 
     # -- aggregates -------------------------------------------------------
 
@@ -174,11 +185,14 @@ class AnalyticsService:
         return costs[:limit]
 
     def cost_by_data_domain(self) -> dict[str, float]:
-        totals: Counter[str] = Counter()
+        # Counter is int-typed; spend is a float. Plain dict, sorted explicitly
+        # so ties break on name rather than on iteration order.
+        totals: defaultdict[str, float] = defaultdict(float)
         for event in self._events():
             if event.data_domain:
                 totals[event.data_domain] += event.estimated_cost_usd or 0.0
-        return {domain: round(value, 6) for domain, value in totals.most_common()}
+        ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+        return {domain: round(value, 6) for domain, value in ranked}
 
     def recent_runs(self, limit: int = 20) -> list[RunSummary]:
         violations_by_run: dict[str, list[PolicyResult]] = {}
@@ -193,11 +207,11 @@ class AnalyticsService:
         return summaries[:limit]
 
     def run_summary(self, correlation_id: str) -> RunSummary | None:
-        chain = self.repository.get_chain(correlation_id)
+        chain = self.repository.get_chain(self.tenant_id, correlation_id)
         if chain is None:
             return None
         violations = self.repository.list_policy_results(
-            correlation_id=correlation_id, violations_only=True
+            self.tenant_id, correlation_id=correlation_id, violations_only=True
         )
         return _summarise(chain, violations)
 

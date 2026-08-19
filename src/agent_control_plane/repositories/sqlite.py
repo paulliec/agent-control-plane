@@ -4,6 +4,10 @@ SQLite because it ships with Python, is transactional, and the MVP's query
 volume is trivial. When event volume or column-scan analytics outgrow it,
 `ControlPlaneRepository` is the seam — a DuckDB implementation drops in behind
 the same Protocol. See docs/ARCHITECTURE.md.
+
+Tenancy: `tenant_id` is part of both primary keys and every index, and every
+read method requires it. There is no query path that returns rows for more than
+one tenant except `list_tenants()`.
 """
 
 from __future__ import annotations
@@ -14,13 +18,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agentops.logging import get_logger, log_context
-from agentops.models.event import AgentEvent, ExecutionChain, build_chain
-from agentops.models.policy import PolicyResult
+from agent_control_plane.logging import get_logger, log_context
+from agent_control_plane.models.event import AgentEvent, ExecutionChain, build_chain
+from agent_control_plane.models.policy import PolicyResult
 
 log = get_logger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -29,7 +33,8 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 
 CREATE TABLE IF NOT EXISTS events (
-    event_id           TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL,
+    event_id           TEXT NOT NULL,
     timestamp          TEXT NOT NULL,
     platform           TEXT NOT NULL,
     agent_id           TEXT NOT NULL,
@@ -55,44 +60,54 @@ CREATE TABLE IF NOT EXISTS events (
     session_id         TEXT,
     source_adapter     TEXT NOT NULL,
     ingested_at        TEXT,
-    metadata           TEXT NOT NULL DEFAULT '{}'
+    metadata           TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (tenant_id, event_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_correlation ON events(correlation_id);
-CREATE INDEX IF NOT EXISTS idx_events_agent       ON events(agent_id);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp   ON events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_events_parent      ON events(parent_event_id);
+CREATE INDEX IF NOT EXISTS idx_events_correlation ON events(tenant_id, correlation_id);
+CREATE INDEX IF NOT EXISTS idx_events_agent       ON events(tenant_id, agent_id);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp   ON events(tenant_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_parent      ON events(tenant_id, parent_event_id);
 
 CREATE TABLE IF NOT EXISTS policy_results (
-    result_id      TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL,
+    result_id      TEXT NOT NULL,
     policy_name    TEXT NOT NULL,
     severity       TEXT NOT NULL,
     passed         INTEGER NOT NULL,
+    decision       TEXT NOT NULL DEFAULT 'allow',
+    enforced       INTEGER NOT NULL DEFAULT 0,
     correlation_id TEXT NOT NULL,
     event_id       TEXT,
     agent_id       TEXT,
     explanation    TEXT NOT NULL,
     evidence       TEXT NOT NULL DEFAULT '{}',
-    evaluated_at   TEXT NOT NULL
+    evaluated_at   TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, result_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_policy_correlation ON policy_results(correlation_id);
-CREATE INDEX IF NOT EXISTS idx_policy_passed      ON policy_results(passed);
+CREATE INDEX IF NOT EXISTS idx_policy_correlation ON policy_results(tenant_id, correlation_id);
+CREATE INDEX IF NOT EXISTS idx_policy_passed      ON policy_results(tenant_id, passed);
 """
 
 _EVENT_COLUMNS = [
-    "event_id", "timestamp", "platform", "agent_id", "agent_name", "actor_id",
-    "actor_type", "event_type", "action", "tool_name", "tool_server", "resource",
-    "data_domain", "status", "error_code", "error_message", "duration_ms",
-    "estimated_cost_usd", "model", "input_tokens", "output_tokens",
+    "tenant_id", "event_id", "timestamp", "platform", "agent_id", "agent_name",
+    "actor_id", "actor_type", "event_type", "action", "tool_name", "tool_server",
+    "resource", "data_domain", "status", "error_code", "error_message",
+    "duration_ms", "estimated_cost_usd", "model", "input_tokens", "output_tokens",
     "parent_event_id", "correlation_id", "session_id", "source_adapter",
     "ingested_at", "metadata",
 ]
 
 _POLICY_COLUMNS = [
-    "result_id", "policy_name", "severity", "passed", "correlation_id",
-    "event_id", "agent_id", "explanation", "evidence", "evaluated_at",
+    "tenant_id", "result_id", "policy_name", "severity", "passed", "decision",
+    "enforced", "correlation_id", "event_id", "agent_id", "explanation",
+    "evidence", "evaluated_at",
 ]
+
+
+class SchemaVersionError(RuntimeError):
+    """The database on disk was written by a different schema version."""
 
 
 class SQLiteRepository:
@@ -120,6 +135,14 @@ class SQLiteRepository:
         return self._conn
 
     def initialise(self) -> None:
+        existing = self._stored_schema_version()
+        if existing is not None and existing != SCHEMA_VERSION:
+            # No migration tooling yet, and silently reading a v1 database with
+            # v2 code would return rows missing tenant_id. Fail loudly instead.
+            raise SchemaVersionError(
+                f"{self.db_path} is schema v{existing}, this build expects "
+                f"v{SCHEMA_VERSION}. Delete it and re-seed, or add a migration."
+            )
         with self.conn:
             self.conn.executescript(_SCHEMA)
             self.conn.execute(
@@ -127,6 +150,17 @@ class SQLiteRepository:
                 ("schema_version", str(SCHEMA_VERSION)),
             )
         log.debug("schema ready", extra=log_context(db=str(self.db_path)))
+
+    def _stored_schema_version(self) -> int | None:
+        tables = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+        ).fetchone()
+        if tables is None:
+            return None
+        row = self.conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        return int(row["value"]) if row else None
 
     def close(self) -> None:
         if self._conn is not None:
@@ -150,10 +184,11 @@ class SQLiteRepository:
             f"INSERT OR IGNORE INTO events ({', '.join(_EVENT_COLUMNS)}) "
             f"VALUES ({placeholders})"
         )
-        before = self.count_events()
+        tenants = {e.tenant_id for e in events}
+        before = sum(self.count_events(t) for t in tenants)
         with self.conn:
             self.conn.executemany(sql, [_event_to_row(e) for e in events])
-        written = self.count_events() - before
+        written = sum(self.count_events(t) for t in tenants) - before
         if written != len(events):
             log.info(
                 "skipped duplicate events",
@@ -161,14 +196,16 @@ class SQLiteRepository:
             )
         return written
 
-    def get_event(self, event_id: str) -> AgentEvent | None:
+    def get_event(self, tenant_id: str, event_id: str) -> AgentEvent | None:
         row = self.conn.execute(
-            "SELECT * FROM events WHERE event_id = ?", (event_id,)
+            "SELECT * FROM events WHERE tenant_id = ? AND event_id = ?",
+            (tenant_id, event_id),
         ).fetchone()
         return _row_to_event(row) if row else None
 
     def list_events(
         self,
+        tenant_id: str,
         *,
         correlation_id: str | None = None,
         agent_id: str | None = None,
@@ -177,8 +214,8 @@ class SQLiteRepository:
         until: datetime | None = None,
         limit: int | None = None,
     ) -> list[AgentEvent]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        clauses = ["tenant_id = ?"]
+        params: list[Any] = [tenant_id]
         for column, value in (
             ("correlation_id", correlation_id),
             ("agent_id", agent_id),
@@ -194,34 +231,43 @@ class SQLiteRepository:
             clauses.append("timestamp <= ?")
             params.append(_iso(until))
 
-        sql = "SELECT * FROM events"
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
+        sql = f"SELECT * FROM events WHERE {' AND '.join(clauses)}"
         sql += " ORDER BY timestamp ASC, event_id ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
         return [_row_to_event(r) for r in self.conn.execute(sql, params)]
 
-    def list_correlation_ids(self, limit: int | None = None) -> list[str]:
+    def list_correlation_ids(self, tenant_id: str, limit: int | None = None) -> list[str]:
         sql = (
             "SELECT correlation_id, MAX(timestamp) AS last_seen FROM events "
-            "GROUP BY correlation_id ORDER BY last_seen DESC"
+            "WHERE tenant_id = ? GROUP BY correlation_id ORDER BY last_seen DESC"
         )
-        params: list[Any] = []
+        params: list[Any] = [tenant_id]
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
         return [str(r["correlation_id"]) for r in self.conn.execute(sql, params)]
 
-    def get_chain(self, correlation_id: str) -> ExecutionChain | None:
-        events = self.list_events(correlation_id=correlation_id)
+    def get_chain(self, tenant_id: str, correlation_id: str) -> ExecutionChain | None:
+        events = self.list_events(tenant_id, correlation_id=correlation_id)
         if not events:
             return None
-        return build_chain(correlation_id, events)
+        return build_chain(correlation_id, events, tenant_id=tenant_id)
 
-    def count_events(self) -> int:
-        return int(self.conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"])
+    def count_events(self, tenant_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE tenant_id = ?", (tenant_id,)
+        ).fetchone()
+        return int(row["n"])
+
+    def list_tenants(self) -> list[str]:
+        return [
+            str(r["tenant_id"])
+            for r in self.conn.execute(
+                "SELECT DISTINCT tenant_id FROM events ORDER BY tenant_id"
+            )
+        ]
 
     # -- policy results ---------------------------------------------------
 
@@ -239,34 +285,35 @@ class SQLiteRepository:
 
     def list_policy_results(
         self,
+        tenant_id: str,
         *,
         correlation_id: str | None = None,
         violations_only: bool = False,
         limit: int | None = None,
     ) -> list[PolicyResult]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        clauses = ["tenant_id = ?"]
+        params: list[Any] = [tenant_id]
         if correlation_id is not None:
             clauses.append("correlation_id = ?")
             params.append(correlation_id)
         if violations_only:
             clauses.append("passed = 0")
 
-        sql = "SELECT * FROM policy_results"
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
+        sql = f"SELECT * FROM policy_results WHERE {' AND '.join(clauses)}"
         sql += " ORDER BY evaluated_at DESC, result_id ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
         return [_row_to_policy(r) for r in self.conn.execute(sql, params)]
 
-    def delete_policy_results(self, correlation_id: str) -> int:
+    def delete_policy_results(self, tenant_id: str, correlation_id: str) -> int:
         with self.conn:
             cur = self.conn.execute(
-                "DELETE FROM policy_results WHERE correlation_id = ?", (correlation_id,)
+                "DELETE FROM policy_results WHERE tenant_id = ? AND correlation_id = ?",
+                (tenant_id, correlation_id),
             )
         return cur.rowcount
+
 
 # -- row mapping ----------------------------------------------------------
 
@@ -294,6 +341,7 @@ def _row_to_event(row: sqlite3.Row) -> AgentEvent:
 def _policy_to_row(result: PolicyResult) -> tuple[Any, ...]:
     data = result.model_dump()
     data["passed"] = 1 if result.passed else 0
+    data["enforced"] = 1 if result.enforced else 0
     data["evidence"] = json.dumps(data["evidence"], default=str)
     data["evaluated_at"] = _iso(result.evaluated_at)
     return tuple(data[col] for col in _POLICY_COLUMNS)
@@ -302,5 +350,6 @@ def _policy_to_row(result: PolicyResult) -> tuple[Any, ...]:
 def _row_to_policy(row: sqlite3.Row) -> PolicyResult:
     data = {col: row[col] for col in _POLICY_COLUMNS}
     data["passed"] = bool(data["passed"])
+    data["enforced"] = bool(data["enforced"])
     data["evidence"] = json.loads(data["evidence"] or "{}")
     return PolicyResult.model_validate(data)

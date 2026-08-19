@@ -1,0 +1,117 @@
+# Controlled vocabulary for data domains, plus vendor-object mapping rules.
+#
+#     vendor object  ->  adapter mapping  ->  controlled governance domain
+#
+# Adapters MUST NOT invent domain names. Anything that doesn't match a mapping
+# becomes the explicit `unknown` domain, which trips the `unknown_data_domain`
+# policy rule. That is deliberate: an unclassified object is a governance gap,
+# and a gap you can see beats a plausible-looking guess.
+#
+# Patterns are case-insensitive globs over the platform's natural identifier.
+# The most specific matching pattern wins (fewest wildcards, then longest), so
+# adding a narrow rule never requires reordering this file.
+
+domains:
+  - name: sales
+    description: Order, revenue and demand facts.
+    sensitivity: internal
+    owner: analytics-platform@contoso.com
+
+  - name: inventory
+    description: On-hand stock, SKUs and warehouse positions.
+    sensitivity: internal
+    owner: supply-chain@contoso.com
+
+  - name: logistics
+    description: Inbound and outbound shipment movement.
+    sensitivity: internal
+    owner: supply-chain@contoso.com
+
+  - name: promotions
+    description: Marketing campaign and promotion calendars.
+    sensitivity: internal
+    owner: marketing@contoso.com
+
+  - name: weather
+    description: Third-party weather data used as a demand covariate.
+    sensitivity: public
+    owner: analytics-platform@contoso.com
+
+  - name: hr
+    description: Employee, staffing and headcount data.
+    sensitivity: restricted
+    owner: people-ops@contoso.com
+
+  - name: finance
+    description: Ledger, margin and cost data.
+    sensitivity: confidential
+    owner: finance@contoso.com
+
+  - name: operations
+    description: Store and site operational telemetry.
+    sensitivity: internal
+    owner: operations@contoso.com
+
+  - name: reporting
+    description: Published analytical artifacts and their distribution.
+    sensitivity: internal
+    owner: analytics-platform@contoso.com
+
+  - name: public
+    description: Data cleared for external release.
+    sensitivity: public
+
+# NOTE: `unknown` is intentionally NOT declared here. It is a reserved
+# classification meaning "no mapping matched", not a domain you can grant
+# access to.
+
+mappings:
+  # --- Snowflake: DATABASE.SCHEMA.OBJECT --------------------------------
+  - platform: snowflake
+    pattern: "SALES*.*.*"
+    domain: sales
+    note: Covers SALES and SALES_PROD style database naming.
+  - platform: snowflake
+    pattern: "MARKETING.*.*"
+    domain: promotions
+  - platform: snowflake
+    pattern: "INVENTORY.*.*"
+    domain: inventory
+  - platform: snowflake
+    pattern: "LOGISTICS.*.*"
+    domain: logistics
+  - platform: snowflake
+    pattern: "HR.*.*"
+    domain: hr
+  - platform: snowflake
+    pattern: "FINANCE.*.*"
+    domain: finance
+  - platform: snowflake
+    pattern: "OPS.*.*"
+    domain: operations
+  - platform: snowflake
+    pattern: "ANALYTICS.REPORTING.*"
+    domain: reporting
+  - platform: snowflake
+    pattern: "SNOWFLAKE.ACCOUNT_USAGE.*"
+    domain: operations
+    note: Telemetry about the platform itself.
+
+  # --- MCP / external tool surfaces -------------------------------------
+  - platform: mcp
+    pattern: "ERP://INVENTORY/*"
+    domain: inventory
+  - platform: mcp
+    pattern: "ERP://SHIPMENTS/*"
+    domain: logistics
+  - platform: mcp
+    pattern: "REPORTING://*"
+    domain: reporting
+
+  # --- Third-party APIs --------------------------------------------------
+  - platform: other
+    pattern: "HTTPS://API.WEATHER.GOV/*"
+    domain: weather
+  - platform: other
+    pattern: "ERP://INVENTORY/*"
+    domain: inventory

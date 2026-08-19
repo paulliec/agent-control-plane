@@ -9,9 +9,9 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from agentops.models.agent import AccessScope, Agent, AgentGovernance
-from agentops.models.enums import AccessMode, AccessScopeMode
-from agentops.registry import load_registry
+from agent_control_plane.models.agent import AccessScope, Agent, AgentGovernance
+from agent_control_plane.models.enums import AccessMode, AccessScopeMode
+from agent_control_plane.registry import load_registry
 
 
 def _governance(**kwargs: object) -> AgentGovernance:

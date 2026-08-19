@@ -5,14 +5,14 @@ from __future__ import annotations
 
 from collections import Counter
 
-from agentops.adapters.base import EventSource
-from agentops.adapters.synthetic import (
+from agent_control_plane.adapters.base import EventSource
+from agent_control_plane.adapters.synthetic import (
     DEFAULT_SCHEDULE,
     SyntheticSource,
     generate_events,
 )
-from agentops.models.enums import ActionType, ActorType, EventType, Platform, Status
-from agentops.models.event import build_chain
+from agent_control_plane.models.enums import ActionType, ActorType, EventType, Platform, Status
+from agent_control_plane.models.event import build_chain
 
 
 def test_source_satisfies_the_protocol() -> None:

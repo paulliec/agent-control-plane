@@ -31,14 +31,15 @@ from datetime import UTC, datetime, timedelta
 from random import Random
 from typing import Any, Literal
 
-from agentops.models.enums import (
+from agent_control_plane.constants import DEFAULT_TENANT_ID
+from agent_control_plane.models.enums import (
     ActionType,
     ActorType,
     EventType,
     Platform,
     Status,
 )
-from agentops.models.event import AgentEvent
+from agent_control_plane.models.event import AgentEvent
 
 ADAPTER_NAME = "synthetic"
 
@@ -60,6 +61,7 @@ Variant = Literal["clean", "degraded", "violation", "shadow", "governed_publish"
 class _RunBuilder:
     """Accumulates one run's events, advancing a clock as it goes."""
 
+    tenant_id: str
     correlation_id: str
     clock: datetime
     rng: Random
@@ -98,6 +100,7 @@ class _RunBuilder:
         event_id = str(uuid.uuid5(_NAMESPACE, f"{self.correlation_id}:{self._seq}"))
         agent_id, agent_name = agent
         event = AgentEvent(
+            tenant_id=self.tenant_id,
             event_id=event_id,
             timestamp=self.clock,
             platform=platform,
@@ -194,7 +197,7 @@ def _query_promotions(b: _RunBuilder, root: AgentEvent) -> AgentEvent:
         parent=root,
         tool_name="promotions.get_calendar",
         tool_server="snowflake-mcp",
-        data_domain="marketing",
+        data_domain="promotions",
         duration_ms=_jitter(b.rng, 700),
         cost_usd=_cost(b.rng, 0.004),
     )
@@ -205,7 +208,7 @@ def _query_promotions(b: _RunBuilder, root: AgentEvent) -> AgentEvent:
         platform=Platform.SNOWFLAKE,
         parent=call,
         resource="MARKETING.PUBLIC.DIM_PROMOTION",
-        data_domain="marketing",
+        data_domain="promotions",
         duration_ms=_jitter(b.rng, 500),
         cost_usd=_cost(b.rng, 0.006),
     )
@@ -636,6 +639,7 @@ class SyntheticSource:
     seed: int = 20260810
     start: datetime = datetime(2026, 6, 22, 6, 0, tzinfo=UTC)
     schedule: tuple[Variant, ...] = DEFAULT_SCHEDULE
+    tenant_id: str = DEFAULT_TENANT_ID
 
     @property
     def name(self) -> str:
@@ -653,6 +657,7 @@ class SyntheticSource:
             week_of = run_start.date().isoformat()
             correlation_id = f"run-{week_of}-{variant}"
             builder = _RunBuilder(
+                tenant_id=self.tenant_id,
                 correlation_id=correlation_id,
                 clock=run_start,
                 rng=rng,
@@ -665,6 +670,9 @@ class SyntheticSource:
 def generate_events(
     seed: int = 20260810,
     schedule: tuple[Variant, ...] = DEFAULT_SCHEDULE,
+    tenant_id: str = DEFAULT_TENANT_ID,
 ) -> list[AgentEvent]:
     """Convenience for tests and scripts."""
-    return list(SyntheticSource(seed=seed, schedule=schedule).fetch())
+    return list(
+        SyntheticSource(seed=seed, schedule=schedule, tenant_id=tenant_id).fetch()
+    )

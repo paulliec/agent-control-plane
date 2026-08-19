@@ -8,7 +8,7 @@ Layering (imports only ever point downward):
                 -> models (vendor-neutral)
 """
 
-from agentops.bootstrap import ControlPlane, build_control_plane
+from agent_control_plane.bootstrap import ControlPlane, build_control_plane
 
 __version__ = "0.1.0"
 

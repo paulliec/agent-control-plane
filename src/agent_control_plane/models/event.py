@@ -13,7 +13,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from agentops.models.enums import (
+from agent_control_plane.models.enums import (
     ActionType,
     ActorType,
     EventType,
@@ -34,6 +34,10 @@ class AgentEvent(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Required, not defaulted. A tenant that can be forgotten is a tenant that
+    # will be forgotten, and cross-tenant bleed is silent when it happens.
+    tenant_id: str = Field(min_length=1, max_length=128)
 
     event_id: str = Field(min_length=1, max_length=128)
     timestamp: datetime
@@ -102,6 +106,8 @@ class AgentEvent(BaseModel):
     def _check_shape(self) -> Self:
         if self.event_type is EventType.TOOL_CALL and not self.tool_name:
             raise ValueError("tool_call events require tool_name")
+        if self.data_domain == "":
+            raise ValueError("data_domain must be a domain name or None, never empty")
         if self.parent_event_id == self.event_id:
             raise ValueError("event cannot be its own parent")
         if self.status is Status.FAILURE and not (self.error_code or self.error_message):
@@ -116,6 +122,7 @@ class AgentEvent(BaseModel):
         """Stable content hash. Lets an adapter mint deterministic ids for
         sources that don't supply one (most audit logs don't)."""
         parts = [
+            self.tenant_id,
             self.correlation_id,
             self.agent_id,
             self.event_type,
@@ -128,12 +135,27 @@ class AgentEvent(BaseModel):
 
 
 class ExecutionChain(BaseModel):
-    """All events for one ``correlation_id``, plus the reconstructed call tree."""
+    """All events for one ``correlation_id``, plus the reconstructed call tree.
+
+    A chain belongs to exactly one tenant. Mixing tenants in one chain would let
+    a policy rule read another tenant's events as evidence, so it is rejected at
+    construction rather than guarded against in every rule.
+    """
 
     model_config = ConfigDict(frozen=True)
 
+    tenant_id: str
     correlation_id: str
     events: tuple[AgentEvent, ...]
+
+    @model_validator(mode="after")
+    def _single_tenant(self) -> Self:
+        foreign = {e.tenant_id for e in self.events} - {self.tenant_id}
+        if foreign:
+            raise ValueError(
+                f"chain {self.correlation_id} mixes tenants: {sorted(foreign)}"
+            )
+        return self
 
     @property
     def roots(self) -> tuple[AgentEvent, ...]:
@@ -198,6 +220,16 @@ class ExecutionChain(BaseModel):
         return out
 
 
-def build_chain(correlation_id: str, events: list[AgentEvent]) -> ExecutionChain:
+def build_chain(
+    correlation_id: str, events: list[AgentEvent], tenant_id: str | None = None
+) -> ExecutionChain:
+    """Assemble a chain. Tenant is taken from the events unless stated, and a
+    mixed-tenant batch raises rather than silently picking one."""
+    if not events:
+        raise ValueError(f"cannot build an empty chain for {correlation_id}")
     ordered = tuple(sorted(events, key=lambda e: (e.timestamp, e.event_id)))
-    return ExecutionChain(correlation_id=correlation_id, events=ordered)
+    return ExecutionChain(
+        tenant_id=tenant_id or ordered[0].tenant_id,
+        correlation_id=correlation_id,
+        events=ordered,
+    )

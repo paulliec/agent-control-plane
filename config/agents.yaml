@@ -35,7 +35,7 @@ agents:
         - inventory.read_stock_levels
         - reporting.render_draft
       data_access_mode: allowlist
-      allowed_data_domains: [sales, marketing, weather, inventory, reporting]
+      allowed_data_domains: [sales, promotions, weather, inventory, reporting]
       max_cost_usd: 2.50
       # A healthy run makes 5-6 tool calls; 12 leaves room for a retry or two
       # while still catching a loop. A ceiling far above normal usage is not a
@@ -97,7 +97,7 @@ agents:
         - inventory.read_stock_levels
         - forecast.run_model
       data_access_mode: allowlist
-      allowed_data_domains: [sales, marketing, inventory, reporting]
+      allowed_data_domains: [sales, promotions, inventory, reporting]
       max_cost_usd: 0.75
       max_tool_calls: 15
 

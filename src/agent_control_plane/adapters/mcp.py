@@ -33,15 +33,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agentops.adapters.base import AdapterError, normalize_all
-from agentops.models.enums import (
+from agent_control_plane.adapters.base import AdapterError, normalize_all
+from agent_control_plane.constants import DEFAULT_TENANT_ID, UNKNOWN_DATA_DOMAIN
+from agent_control_plane.models.data_domain import DataDomainRegistry
+from agent_control_plane.models.enums import (
     ActionType,
     ActorType,
     EventType,
     Platform,
     Status,
 )
-from agentops.models.event import AgentEvent
+from agent_control_plane.models.event import AgentEvent
 
 ADAPTER_NAME = "mcp"
 
@@ -93,7 +95,41 @@ _KNOWN_KEYS = {
 }
 
 
-def to_event(record: dict[str, Any]) -> AgentEvent:
+def classify_domain(
+    record: dict[str, Any], domains: DataDomainRegistry | None
+) -> str | None:
+    """Vendor object -> controlled governance domain.
+
+    The gateway's own ``data_domain`` string is treated as a *claim*, not an
+    answer: it only survives if it is in the controlled vocabulary. A resource
+    with a mapping rule beats the claim, because mapping rules are ours and the
+    claim is the vendor's.
+
+    With no vocabulary configured there is nothing to validate against, so the
+    record passes through unchanged — that keeps the adapter usable standalone
+    without silently inventing classifications when a vocabulary *does* exist.
+    """
+    claimed = record.get("data_domain")
+    if domains is None or not domains.domains:
+        return claimed
+
+    if resource := record.get("resource"):
+        mapped = domains.classify(Platform.MCP, str(resource))
+        if mapped != UNKNOWN_DATA_DOMAIN:
+            return mapped
+
+    if claimed and domains.is_known(str(claimed)):
+        return str(claimed)
+
+    # Something was touched but nobody classified it. Say so out loud.
+    return UNKNOWN_DATA_DOMAIN if (claimed or record.get("resource")) else None
+
+
+def to_event(
+    record: dict[str, Any],
+    tenant_id: str = DEFAULT_TENANT_ID,
+    domains: DataDomainRegistry | None = None,
+) -> AgentEvent:
     """Map one raw MCP log record. Raises on anything it can't map honestly."""
     if not isinstance(record, dict):
         raise ValueError("record must be an object")
@@ -138,6 +174,7 @@ def to_event(record: dict[str, Any]) -> AgentEvent:
     metadata["mcp_method"] = method
 
     return AgentEvent(
+        tenant_id=tenant_id,
         event_id=span_id,
         timestamp=timestamp,
         platform=Platform.MCP,
@@ -150,7 +187,7 @@ def to_event(record: dict[str, Any]) -> AgentEvent:
         tool_name=tool_name,
         tool_server=record.get("server"),
         resource=record.get("resource"),
-        data_domain=record.get("data_domain"),
+        data_domain=classify_domain(record, domains),
         status=status,
         error_code=error_code,
         error_message=error_message,
@@ -170,8 +207,17 @@ def to_event(record: dict[str, Any]) -> AgentEvent:
 class MCPCallLogSource:
     """`EventSource` over one or more MCP gateway JSONL logs."""
 
-    def __init__(self, log_path: Path | str, *, strict: bool = False) -> None:
+    def __init__(
+        self,
+        log_path: Path | str,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+        domains: DataDomainRegistry | None = None,
+        strict: bool = False,
+    ) -> None:
         self.log_path = Path(log_path)
+        self.tenant_id = tenant_id
+        self.domains = domains
         self.strict = strict
 
     @property
@@ -179,8 +225,11 @@ class MCPCallLogSource:
         return ADAPTER_NAME
 
     def fetch(self, since: datetime | None = None) -> Iterable[AgentEvent]:
+        def mapper(record: dict[str, Any]) -> AgentEvent:
+            return to_event(record, self.tenant_id, self.domains)
+
         for event in normalize_all(
-            self.name, self._read_records(), to_event, strict=self.strict
+            self.name, self._read_records(), mapper, strict=self.strict
         ):
             if since is None or event.timestamp >= since:
                 yield event

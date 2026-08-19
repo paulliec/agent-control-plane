@@ -28,10 +28,10 @@ dev = [
 ]
 
 [project.scripts]
-agentops = "agentops.cli:main"
+acp = "agent_control_plane.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agentops"]
+packages = ["src/agent_control_plane"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -48,7 +48,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
 python_version = "3.12"
-packages = ["agentops"]
+packages = ["agent_control_plane"]
 mypy_path = "src"
 strict = true
 warn_unused_ignores = true

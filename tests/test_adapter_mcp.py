@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from agentops.adapters.base import AdapterError, EventSource, NormalizationError
-from agentops.adapters.mcp import MCPCallLogSource, to_event
-from agentops.config import REPO_ROOT
-from agentops.models.enums import ActionType, ActorType, EventType, Platform, Status
+from agent_control_plane.adapters.base import AdapterError, EventSource, NormalizationError
+from agent_control_plane.adapters.mcp import MCPCallLogSource, classify_domain, to_event
+from agent_control_plane.config import REPO_ROOT
+from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
+from agent_control_plane.models.data_domain import DataDomainRegistry
+from agent_control_plane.models.enums import ActionType, ActorType, EventType, Platform, Status
 
 SAMPLE_LOG = REPO_ROOT / "data" / "samples" / "mcp_tool_calls.jsonl"
 
@@ -139,6 +141,55 @@ def test_missing_span_id_gets_a_deterministic_one() -> None:
     assert len(first.event_id) == 36  # uuid5
 
 
+# -- domain classification ------------------------------------------------
+#
+# The gateway's `data_domain` is a claim. These tests pin down when we believe
+# it, when we override it, and when we refuse to launder it into the core.
+
+
+def test_no_vocabulary_passes_the_claim_through() -> None:
+    """Standalone use of the adapter must not require a registry."""
+    assert classify_domain(_record(), None) == "sales"
+    assert classify_domain(_record(), DataDomainRegistry()) == "sales"
+
+
+def test_a_claim_in_the_vocabulary_survives(vocabulary: DataDomainRegistry) -> None:
+    assert classify_domain(_record(data_domain="sales"), vocabulary) == "sales"
+
+
+def test_a_claim_outside_the_vocabulary_becomes_unknown(
+    vocabulary: DataDomainRegistry,
+) -> None:
+    """A typo or a vendor-invented name must not silently become a domain."""
+    assert classify_domain(_record(data_domain="inventry"), vocabulary) == UNKNOWN_DATA_DOMAIN
+
+
+def test_a_mapping_rule_beats_the_vendor_claim(vocabulary: DataDomainRegistry) -> None:
+    """Mapping rules are ours; the claim is theirs. Ours wins."""
+    record = _record(resource="erp://hr/headcount", data_domain="sales")
+    assert classify_domain(record, vocabulary) == "hr"
+
+
+def test_an_unmapped_resource_with_no_claim_is_unknown(
+    vocabulary: DataDomainRegistry,
+) -> None:
+    record = _record(resource="erp://returns/rma_queue")
+    del record["data_domain"]
+    assert classify_domain(record, vocabulary) == UNKNOWN_DATA_DOMAIN
+
+
+def test_touching_no_data_classifies_as_nothing(vocabulary: DataDomainRegistry) -> None:
+    """Absent is not the same as unclassified — a `prompts/list` has no domain."""
+    record = _record()
+    del record["data_domain"]
+    assert classify_domain(record, vocabulary) is None
+
+
+def test_to_event_applies_the_vocabulary(vocabulary: DataDomainRegistry) -> None:
+    event = to_event(_record(data_domain="inventry"), domains=vocabulary)
+    assert event.data_domain == UNKNOWN_DATA_DOMAIN
+
+
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [
@@ -159,12 +210,22 @@ def test_unmappable_records_raise(mutation: dict[str, object], match: str) -> No
 
 def test_reads_the_committed_sample_log() -> None:
     events = list(MCPCallLogSource(SAMPLE_LOG).fetch())
-    # 10 records, one of which (prompts/list) is deliberately unmappable.
-    assert len(events) == 9
+    # 11 records; the `prompts/list` one has no honest mapping and is dropped.
+    assert len(events) == 10
     assert {e.correlation_id for e in events} == {"mcp-analyst-2026-08-06"}
     assert {e.source_adapter for e in events} == {"mcp"}
     denied = [e for e in events if e.status is Status.DENIED]
     assert [e.tool_name for e in denied] == ["reporting.publish"]
+
+
+def test_sample_log_carries_an_unclassifiable_resource(
+    vocabulary: DataDomainRegistry,
+) -> None:
+    """`erp://returns/rma_queue` is in the fixture on purpose: no mapping rule
+    covers returns, so it must surface as `unknown` rather than be dropped."""
+    events = list(MCPCallLogSource(SAMPLE_LOG, domains=vocabulary).fetch())
+    rma = next(e for e in events if e.resource == "erp://returns/rma_queue")
+    assert rma.data_domain == UNKNOWN_DATA_DOMAIN
 
 
 def test_bad_records_are_skipped_by_default(tmp_path: Path) -> None:

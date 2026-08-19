@@ -1,9 +1,14 @@
 """Policy engine: runs rules over an execution chain and emits audit results.
 
 The engine knows nothing about individual rules. Adding a rule means writing a
-class with ``name``, ``severity``, ``description`` and ``evaluate``, then putting
-it in the list handed to `PolicyEngine`. No registration decorators, no plugin
-loader — the rule list *is* the configuration.
+class with ``name``, ``severity``, ``description``, ``decision`` and
+``evaluate``, then putting it in the list handed to `PolicyEngine`. No
+registration decorators, no plugin loader — the rule list *is* the configuration.
+
+**Observe, evaluate, report.** Rules declare what an enforcement point *would*
+do (`Decision`), and the engine records it. Nothing here acts on that decision.
+See docs/ARCHITECTURE.md for why enforcement is a separate product with
+different availability and latency obligations.
 """
 
 from __future__ import annotations
@@ -14,12 +19,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
-from agentops.logging import get_logger, log_context
-from agentops.models.agent import AgentGovernance
-from agentops.models.enums import Severity
-from agentops.models.event import ExecutionChain
-from agentops.models.policy import PolicyReport, PolicyResult
-from agentops.registry import Registry
+from agent_control_plane.logging import get_logger, log_context
+from agent_control_plane.models.agent import AgentGovernance
+from agent_control_plane.models.enums import Decision, Severity
+from agent_control_plane.models.event import ExecutionChain
+from agent_control_plane.models.policy import PolicyReport, PolicyResult
+from agent_control_plane.registry import Registry
 
 log = get_logger(__name__)
 
@@ -36,6 +41,7 @@ class Finding:
     event_id: str | None = None
     agent_id: str | None = None
     severity: Severity | None = None  # overrides the rule's default when set
+    decision: Decision | None = None  # ditto
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +65,7 @@ class PolicyRule(Protocol):
     name: str
     severity: Severity
     description: str
+    decision: Decision
 
     def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]: ...
 
@@ -102,6 +109,7 @@ class PolicyEngine:
                         event_id=None,
                         agent_id=None,
                         severity=Severity.INFO,
+                        decision=Decision.ALLOW,
                         evaluated_at=evaluated_at,
                         discriminator="pass",
                     )
@@ -119,18 +127,25 @@ class PolicyEngine:
                         event_id=finding.event_id,
                         agent_id=finding.agent_id,
                         severity=finding.severity or rule.severity,
+                        decision=finding.decision or rule.decision,
                         evaluated_at=evaluated_at,
                         discriminator=finding.event_id or f"{finding.agent_id}:{index}",
                     )
                 )
 
-        report = PolicyReport(correlation_id=chain.correlation_id, results=tuple(results))
+        report = PolicyReport(
+            tenant_id=chain.tenant_id,
+            correlation_id=chain.correlation_id,
+            results=tuple(results),
+        )
         if report.violations:
             log.info(
                 "policy violations found",
                 extra=log_context(
+                    tenant=chain.tenant_id,
                     correlation_id=chain.correlation_id,
                     violations=len(report.violations),
+                    would_block=len(report.would_block),
                     max_severity=report.max_severity,
                 ),
             )
@@ -152,19 +167,21 @@ def _result(
     event_id: str | None,
     agent_id: str | None,
     severity: Severity,
+    decision: Decision,
     evaluated_at: datetime,
     discriminator: str,
 ) -> PolicyResult:
     # Deterministic id: re-evaluating a run replaces its results instead of
     # accumulating duplicates.
-    result_id = str(
-        uuid.uuid5(_NAMESPACE, f"{rule.name}:{chain.correlation_id}:{discriminator}")
-    )
+    key = f"{chain.tenant_id}:{rule.name}:{chain.correlation_id}:{discriminator}"
+    result_id = str(uuid.uuid5(_NAMESPACE, key))
     return PolicyResult(
+        tenant_id=chain.tenant_id,
         result_id=result_id,
         policy_name=rule.name,
         severity=severity,
         passed=passed,
+        decision=decision,
         correlation_id=chain.correlation_id,
         event_id=event_id,
         agent_id=agent_id,

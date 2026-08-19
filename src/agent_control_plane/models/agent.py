@@ -14,7 +14,8 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from agentops.models.enums import AccessMode, AccessScopeMode, ActionType, Platform
+from agent_control_plane.constants import DEFAULT_TENANT_ID
+from agent_control_plane.models.enums import AccessMode, AccessScopeMode, ActionType, Platform
 
 
 class AccessScope(BaseModel):
@@ -127,6 +128,7 @@ class Agent(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    tenant_id: str = DEFAULT_TENANT_ID
     agent_id: str = Field(min_length=1, max_length=128)
     name: str
     platform: Platform

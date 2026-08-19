@@ -25,17 +25,19 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 
-from agentops.models.agent import AgentGovernance
-from agentops.models.enums import (
+from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
+from agent_control_plane.models.agent import AgentGovernance
+from agent_control_plane.models.enums import (
     MUTATING_ACTIONS,
     AccessMode,
     ActionType,
+    Decision,
     EventType,
     Severity,
     Status,
 )
-from agentops.models.event import AgentEvent, ExecutionChain
-from agentops.services.policy_engine import Finding, PolicyContext, PolicyRule
+from agent_control_plane.models.event import AgentEvent, ExecutionChain
+from agent_control_plane.services.policy_engine import Finding, PolicyContext, PolicyRule
 
 # Evidence keeps every event id, but explanations only name a few.
 _MAX_LISTED_EVENTS = 10
@@ -88,10 +90,14 @@ class UnauthorizedDataDomainRule:
     name = "unauthorized_data_domain"
     severity = Severity.HIGH
     description = "Agent touched a data domain outside its declared scope."
+    decision = Decision.DENY
 
     @staticmethod
     def _detect(event: AgentEvent, ctx: PolicyContext) -> str | None:
-        if not event.data_domain:
+        # `unknown` means *we* failed to classify the object. Nobody can be
+        # allowlisted for it, so flagging the agent here would be a guaranteed
+        # HIGH would-block finding for our own gap. `unknown_data_domain` owns it.
+        if not event.data_domain or event.data_domain == UNKNOWN_DATA_DOMAIN:
             return None
         gov = _governance(ctx, event.agent_id)
         return None if gov.data_access.permits(event.data_domain) else event.data_domain
@@ -121,6 +127,7 @@ class ToolAllowlistRule:
     name = "tool_not_allowlisted"
     severity = Severity.HIGH
     description = "Agent called a tool outside its declared scope."
+    decision = Decision.DENY
 
     @staticmethod
     def _detect(event: AgentEvent, ctx: PolicyContext) -> str | None:
@@ -156,6 +163,7 @@ class ReadOnlyViolationRule:
     name = "read_only_violation"
     severity = Severity.CRITICAL
     description = "Read-only agent attempted a state-changing operation."
+    decision = Decision.DENY
 
     @staticmethod
     def _detect(event: AgentEvent, ctx: PolicyContext) -> str | None:
@@ -211,6 +219,7 @@ class ApprovalRequiredRule:
     name = "missing_human_approval"
     severity = Severity.HIGH
     description = "Action required human approval and none was recorded."
+    decision = Decision.REQUIRE_APPROVAL
 
     @staticmethod
     def _approvals(chain: ExecutionChain) -> tuple[set[str], set[str]]:
@@ -267,12 +276,66 @@ class ApprovalRequiredRule:
             )
 
 
+class UnknownDataDomainRule:
+    """An object nobody classified.
+
+    Two ways to get here, both governance gaps rather than agent misbehaviour:
+    the adapter had no mapping rule for the vendor object (`unknown`), or a
+    domain name reached the core that isn't in the controlled vocabulary at all
+    — which should be impossible via an adapter and means something bypassed it.
+
+    Decision is ALLOW: the agent did nothing wrong, *we* failed to classify the
+    data. Blocking on our own config gap would be punishing the wrong party.
+    """
+
+    name = "unknown_data_domain"
+    severity = Severity.MEDIUM
+    description = "Data was accessed under an unclassified governance domain."
+    decision = Decision.ALLOW
+
+    @staticmethod
+    def _detect(event: AgentEvent, ctx: PolicyContext) -> str | None:
+        if not event.data_domain:
+            return None
+        vocabulary = ctx.registry.data_domains
+        if not vocabulary.domains:
+            return None  # no vocabulary configured; nothing to be unknown against
+        if event.data_domain == UNKNOWN_DATA_DOMAIN:
+            return UNKNOWN_DATA_DOMAIN
+        return None if vocabulary.is_known(event.data_domain) else event.data_domain
+
+    def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]:
+        for agent_id, domain, events in _group_by_subject(chain, ctx, self._detect):
+            unmapped = domain == UNKNOWN_DATA_DOMAIN
+            yield Finding(
+                event_id=events[0].event_id,
+                agent_id=agent_id,
+                explanation=(
+                    f"{agent_id} accessed data {_times(len(events))} that no mapping "
+                    f"rule classifies; add a mapping in config/data_domains.yaml."
+                    if unmapped
+                    else f"{agent_id} accessed data domain '{domain}' {_times(len(events))}, "
+                    f"which is not in the controlled vocabulary."
+                ),
+                evidence={
+                    "data_domain": domain,
+                    "reason": "no_mapping_rule" if unmapped else "not_in_vocabulary",
+                    "resources": sorted({e.resource for e in events if e.resource}),
+                    "platforms": sorted({e.platform.value for e in events}),
+                    "tools": sorted({e.tool_name for e in events if e.tool_name}),
+                    "known_domains": sorted(ctx.registry.data_domains.domains),
+                    **_occurrence_evidence(events),
+                },
+            )
+
+
 class UnregisteredAgentRule:
     """Shadow agents. You cannot govern what you have not inventoried."""
 
     name = "unregistered_agent"
     severity = Severity.MEDIUM
     description = "Activity observed from an agent that is not in the registry."
+    decision = Decision.ALLOW
 
     def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]:
         for agent_id in chain.agent_ids:
@@ -306,6 +369,7 @@ class CostThresholdRule:
     name = "cost_threshold_exceeded"
     severity = Severity.MEDIUM
     description = "Agent spend in a single run exceeded its configured ceiling."
+    decision = Decision.DENY
 
     def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]:
         totals: dict[str, float] = {}
@@ -354,6 +418,7 @@ class ToolCallVolumeRule:
     name = "excessive_tool_calls"
     severity = Severity.MEDIUM
     description = "Agent made an unusually high number of tool calls in one run."
+    decision = Decision.DENY
 
     def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]:
         calls: Counter[str] = Counter()
@@ -406,4 +471,5 @@ def default_rules() -> list[PolicyRule]:
         CostThresholdRule(),
         ToolCallVolumeRule(),
         UnregisteredAgentRule(),
+        UnknownDataDomainRule(),
     ]

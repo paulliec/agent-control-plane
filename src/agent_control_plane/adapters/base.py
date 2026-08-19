@@ -15,8 +15,8 @@ from collections.abc import Iterable, Iterator
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from agentops.logging import get_logger, log_context
-from agentops.models.event import AgentEvent
+from agent_control_plane.logging import get_logger, log_context
+from agent_control_plane.models.event import AgentEvent
 
 log = get_logger(__name__)
 

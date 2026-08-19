@@ -3,11 +3,11 @@
 Exists so the whole system is exercisable without Streamlit — the dashboard is
 a view, not the product.
 
-    agentops seed --reset
-    agentops stats
-    agentops runs
-    agentops trace run-2026-08-17-violation
-    agentops violations
+    agent_control_plane seed --reset
+    agent_control_plane stats
+    agent_control_plane runs
+    agent_control_plane trace run-2026-08-17-violation
+    agent_control_plane violations
 """
 
 from __future__ import annotations
@@ -16,12 +16,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from agentops.adapters.mcp import MCPCallLogSource
-from agentops.adapters.synthetic import SyntheticSource
-from agentops.bootstrap import ControlPlane, build_control_plane
-from agentops.config import load_settings
-from agentops.logging import configure_logging
-from agentops.models.enums import EventType
+from agent_control_plane.adapters.base import EventSource
+from agent_control_plane.adapters.mcp import MCPCallLogSource
+from agent_control_plane.adapters.synthetic import SyntheticSource
+from agent_control_plane.bootstrap import ControlPlane, build_control_plane
+from agent_control_plane.config import load_settings
+from agent_control_plane.logging import configure_logging
+from agent_control_plane.models.enums import EventType
 
 _TREE_MARK = {
     EventType.AGENT_RUN_START: "run",
@@ -43,10 +44,14 @@ def _default_mcp_log(cp: ControlPlane) -> Path:
 
 
 def cmd_seed(cp: ControlPlane, args: argparse.Namespace) -> int:
-    sources = [SyntheticSource(seed=args.seed)]
+    sources: list[EventSource] = [SyntheticSource(seed=args.seed, tenant_id=cp.tenant_id)]
     mcp_log = Path(args.mcp_log) if args.mcp_log else _default_mcp_log(cp)
     if mcp_log.exists():
-        sources.append(MCPCallLogSource(mcp_log))
+        sources.append(
+            MCPCallLogSource(
+                mcp_log, tenant_id=cp.tenant_id, domains=cp.registry.data_domains
+            )
+        )
     else:
         print(f"! no MCP log at {mcp_log}, skipping that source")
 
@@ -135,7 +140,7 @@ def cmd_trace(cp: ControlPlane, args: argparse.Namespace) -> int:
         )
 
     violations = cp.repository.list_policy_results(
-        correlation_id=args.correlation_id, violations_only=True
+        cp.tenant_id, correlation_id=args.correlation_id, violations_only=True
     )
     if violations:
         violations.sort(key=lambda v: (-v.severity.rank, v.policy_name))
@@ -156,9 +161,10 @@ def cmd_violations(cp: ControlPlane, args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agentops", description=__doc__)
+    parser = argparse.ArgumentParser(prog="agent_control_plane", description=__doc__)
     parser.add_argument("--db", help="override the SQLite path")
     parser.add_argument("--log-level", default=None)
+    parser.add_argument("--tenant", default=None, help="tenant to operate on")
     sub = parser.add_subparsers(dest="command", required=True)
 
     seed = sub.add_parser("seed", help="generate and ingest sample data")
@@ -198,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         db_path.unlink()
         print(f"removed {db_path}")
 
-    with build_control_plane(settings, db_path=db_path) as cp:
+    with build_control_plane(settings, db_path=db_path, tenant_id=args.tenant) as cp:
         return int(args.func(cp, args))
 
 

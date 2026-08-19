@@ -5,10 +5,17 @@ from datetime import datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from agentops.models.enums import ActionType, EventType, Platform, Severity, Status
-from agentops.models.event import AgentEvent, build_chain
-from agentops.models.policy import PolicyResult
-from tests.conftest import FIXED_NOW, T0, make_event
+from agent_control_plane.models.enums import (
+    ActionType,
+    Decision,
+    EventType,
+    Platform,
+    Severity,
+    Status,
+)
+from agent_control_plane.models.event import AgentEvent, ExecutionChain, build_chain
+from agent_control_plane.models.policy import PolicyReport
+from tests.conftest import OTHER_TENANT, T0, TENANT, make_event, make_result
 
 
 def test_naive_timestamp_rejected() -> None:
@@ -64,16 +71,7 @@ def test_fingerprint_is_stable_and_content_sensitive() -> None:
 
 def test_violation_requires_evidence() -> None:
     with pytest.raises(ValidationError, match="evidence"):
-        PolicyResult(
-            result_id="r1",
-            policy_name="p",
-            severity=Severity.HIGH,
-            passed=False,
-            correlation_id="run-1",
-            explanation="nope",
-            evidence={},
-            evaluated_at=FIXED_NOW,
-        )
+        make_result(evidence={})
 
 
 def test_severity_ordering() -> None:
@@ -169,3 +167,111 @@ def test_platform_is_an_enum_not_a_free_string() -> None:
     with pytest.raises(ValidationError):
         make_event(platform="snowflake-prod-eu")
     assert make_event(platform="snowflake").platform is Platform.SNOWFLAKE
+
+
+# -- tenancy --------------------------------------------------------------
+
+
+def test_tenant_id_is_required_not_defaulted() -> None:
+    """A tenant that can be forgotten is a tenant that will be forgotten."""
+    payload = make_event().model_dump()
+    del payload["tenant_id"]
+    with pytest.raises(ValidationError, match="tenant_id"):
+        AgentEvent.model_validate(payload)
+
+
+def test_tenant_id_cannot_be_empty() -> None:
+    with pytest.raises(ValidationError):
+        make_event(tenant_id="")
+
+
+def test_fingerprints_differ_across_tenants() -> None:
+    """Two tenants can legitimately run identical workloads. If the fingerprint
+    ignored tenant, deduplication would silently merge their events."""
+    ours = make_event()
+    theirs = make_event(tenant_id=OTHER_TENANT)
+    assert ours.tenant_id != theirs.tenant_id
+    assert ours.fingerprint() != theirs.fingerprint()
+
+
+def test_fingerprint_still_ignores_event_id_within_a_tenant() -> None:
+    # Guards the above test against being satisfied by a fingerprint that just
+    # hashes everything.
+    assert make_event().fingerprint() == make_event(event_id="evt-other").fingerprint()
+
+
+def test_mixed_tenant_chain_is_rejected() -> None:
+    events = [make_event(event_id="mine"), make_event(event_id="theirs", tenant_id=OTHER_TENANT)]
+    with pytest.raises(ValidationError, match="mixes tenants"):
+        build_chain("run-1", events)
+
+
+def test_chain_rejects_events_foreign_to_its_declared_tenant() -> None:
+    """Stating the tenant explicitly must not override what the events say."""
+    with pytest.raises(ValidationError, match="mixes tenants"):
+        build_chain("run-1", [make_event()], tenant_id=OTHER_TENANT)
+
+
+def test_chain_takes_its_tenant_from_the_events() -> None:
+    chain = build_chain("run-1", [make_event(tenant_id=OTHER_TENANT)])
+    assert chain.tenant_id == OTHER_TENANT
+
+
+def test_chain_constructed_directly_is_also_guarded() -> None:
+    """The guard lives on the model, not just on the build_chain helper."""
+    with pytest.raises(ValidationError, match="mixes tenants"):
+        ExecutionChain(
+            tenant_id=TENANT,
+            correlation_id="run-1",
+            events=(make_event(tenant_id=OTHER_TENANT),),
+        )
+
+
+def test_empty_chain_is_rejected() -> None:
+    """An empty chain has no tenant to belong to, so it cannot be built."""
+    with pytest.raises(ValueError, match="empty chain"):
+        build_chain("run-1", [])
+
+
+# -- decision / enforcement scaffolding -----------------------------------
+
+
+def test_results_default_to_allow_and_unenforced() -> None:
+    result = make_result()
+    assert result.decision is Decision.ALLOW
+    assert result.enforced is False
+    assert result.would_block is False
+
+
+def test_would_block_needs_both_a_violation_and_a_blocking_decision() -> None:
+    assert make_result(decision=Decision.DENY).would_block is True
+    assert make_result(decision=Decision.REQUIRE_APPROVAL).would_block is True
+    assert make_result(decision=Decision.ALLOW).would_block is False
+    # A pass never blocks, whatever else is true of it.
+    assert make_result(passed=True, evidence={}).would_block is False
+
+
+def test_a_passing_result_cannot_carry_a_blocking_decision() -> None:
+    with pytest.raises(ValidationError, match="passing result"):
+        make_result(passed=True, evidence={}, decision=Decision.DENY)
+
+
+def test_enforcement_cannot_be_claimed_while_observe_only() -> None:
+    """The product observes. Until that changes, a result claiming it enforced
+    something is a lie the audit trail must not be able to tell."""
+    with pytest.raises(ValidationError, match="enforcement is not implemented"):
+        make_result(enforced=True)
+
+
+def test_report_would_block_selects_only_the_blocking_violations() -> None:
+    report = PolicyReport(
+        tenant_id=TENANT,
+        correlation_id="run-1",
+        results=(
+            make_result(result_id="r1", decision=Decision.DENY),
+            make_result(result_id="r2", decision=Decision.ALLOW),
+            make_result(result_id="r3", passed=True, evidence={}),
+        ),
+    )
+    assert [r.result_id for r in report.would_block] == ["r1"]
+    assert [r.result_id for r in report.violations] == ["r1", "r2"]

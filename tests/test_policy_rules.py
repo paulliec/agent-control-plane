@@ -4,16 +4,29 @@ from datetime import timedelta
 
 import pytest
 
-from agentops.models.enums import ActionType, EventType, Severity, Status
-from agentops.models.event import AgentEvent, build_chain
-from agentops.services.policy_engine import Finding, PolicyContext, PolicyEngine, PolicyRule
-from agentops.services.policy_rules import (
+from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
+from agent_control_plane.models.enums import (
+    ActionType,
+    Decision,
+    EventType,
+    Severity,
+    Status,
+)
+from agent_control_plane.models.event import AgentEvent, build_chain
+from agent_control_plane.services.policy_engine import (
+    Finding,
+    PolicyContext,
+    PolicyEngine,
+    PolicyRule,
+)
+from agent_control_plane.services.policy_rules import (
     ApprovalRequiredRule,
     CostThresholdRule,
     ReadOnlyViolationRule,
     ToolAllowlistRule,
     ToolCallVolumeRule,
     UnauthorizedDataDomainRule,
+    UnknownDataDomainRule,
     UnregisteredAgentRule,
     default_rules,
 )
@@ -52,6 +65,16 @@ def test_allowed_domain_passes(ctx: PolicyContext) -> None:
 
 def test_agent_without_domain_allowlist_is_unrestricted(ctx: PolicyContext) -> None:
     event = make_event(agent_id="agt_open", data_domain="anything")
+    assert _findings(UnauthorizedDataDomainRule(), ctx, event) == []
+
+
+def test_an_unclassified_domain_is_not_the_agents_scope_violation(
+    ctx: PolicyContext,
+) -> None:
+    """Nobody can be allowlisted for `unknown`, so charging the agent with a
+    scope breach here would turn every classification gap of ours into a HIGH
+    would-block finding against them. `unknown_data_domain` owns this case."""
+    event = make_event(data_domain=UNKNOWN_DATA_DOMAIN, resource="erp://returns/rma")
     assert _findings(UnauthorizedDataDomainRule(), ctx, event) == []
 
 
@@ -316,6 +339,71 @@ def test_empty_allowlist_denies_every_data_domain(ctx: PolicyContext) -> None:
         make_event(agent_id="agt_locked", data_domain="sales"),
     )
     assert len(findings) == 1
+
+
+# -- unknown data domain --------------------------------------------------
+#
+# This rule is about *our* classification gap, not the agent's behaviour: it is
+# MEDIUM and its decision is ALLOW. Blocking an agent because we never wrote a
+# mapping rule would punish the wrong party.
+
+
+def test_unknown_domain_fires_when_nothing_mapped(ctx_with_vocabulary: PolicyContext) -> None:
+    findings = _findings(
+        UnknownDataDomainRule(),
+        ctx_with_vocabulary,
+        make_event(
+            agent_id="agt_open",
+            data_domain=UNKNOWN_DATA_DOMAIN,
+            resource="erp://returns/rma_queue",
+        ),
+    )
+    assert len(findings) == 1
+    assert findings[0].evidence["reason"] == "no_mapping_rule"
+    assert findings[0].evidence["resources"] == ["erp://returns/rma_queue"]
+    assert "data_domains.yaml" in findings[0].explanation
+
+
+def test_a_domain_outside_the_vocabulary_fires_with_a_different_reason(
+    ctx_with_vocabulary: PolicyContext,
+) -> None:
+    """A typo like `inventry` is a config drift signal, not a missing mapping."""
+    findings = _findings(
+        UnknownDataDomainRule(),
+        ctx_with_vocabulary,
+        make_event(agent_id="agt_open", data_domain="inventry"),
+    )
+    assert len(findings) == 1
+    assert findings[0].evidence["reason"] == "not_in_vocabulary"
+    assert findings[0].evidence["data_domain"] == "inventry"
+    assert "sales" in findings[0].evidence["known_domains"]
+
+
+def test_a_declared_domain_passes(ctx_with_vocabulary: PolicyContext) -> None:
+    assert _findings(
+        UnknownDataDomainRule(), ctx_with_vocabulary, make_event(data_domain="sales")
+    ) == []
+
+
+def test_no_vocabulary_means_nothing_to_be_unknown_against(ctx: PolicyContext) -> None:
+    """Without a configured vocabulary the rule must stay silent rather than
+    flag every event on the platform."""
+    assert _findings(UnknownDataDomainRule(), ctx, make_event(data_domain="whatever")) == []
+
+
+def test_an_event_touching_no_data_is_not_a_classification_gap(
+    ctx_with_vocabulary: PolicyContext,
+) -> None:
+    event = make_event(
+        data_domain=None, tool_name=None, event_type=EventType.AGENT_RUN_START
+    )
+    assert _findings(UnknownDataDomainRule(), ctx_with_vocabulary, event) == []
+
+
+def test_unknown_domain_is_observed_not_blocked() -> None:
+    rule = UnknownDataDomainRule()
+    assert rule.severity is Severity.MEDIUM
+    assert rule.decision is Decision.ALLOW
 
 
 # -- engine ---------------------------------------------------------------

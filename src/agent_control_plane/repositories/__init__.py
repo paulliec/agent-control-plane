@@ -1,9 +1,9 @@
-from agentops.repositories.base import (
+from agent_control_plane.repositories.base import (
     ControlPlaneRepository,
     EventRepository,
     PolicyResultRepository,
 )
-from agentops.repositories.sqlite import SQLiteRepository
+from agent_control_plane.repositories.sqlite import SQLiteRepository
 
 __all__ = [
     "ControlPlaneRepository",

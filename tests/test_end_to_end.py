@@ -7,20 +7,31 @@ from pathlib import Path
 
 import pytest
 
-from agentops.adapters.mcp import MCPCallLogSource
-from agentops.adapters.synthetic import SyntheticSource, generate_events
-from agentops.bootstrap import ControlPlane
-from agentops.config import REPO_ROOT
-from agentops.models.enums import AccessScopeMode, EventType, Severity
-from agentops.registry import Registry, RegistryError, load_registry
+from agent_control_plane.adapters.mcp import MCPCallLogSource
+from agent_control_plane.adapters.synthetic import SyntheticSource, generate_events
+from agent_control_plane.bootstrap import ControlPlane, build_control_plane
+from agent_control_plane.config import REPO_ROOT, Settings
+from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
+from agent_control_plane.models.enums import AccessScopeMode, EventType, Severity
+from agent_control_plane.registry import Registry, RegistryError, load_registry
 
 SAMPLE_LOG = REPO_ROOT / "data" / "samples" / "mcp_tool_calls.jsonl"
 
 
 @pytest.fixture
 def seeded(control_plane: ControlPlane) -> ControlPlane:
+    # Wired exactly as `acp seed` wires it — including the vocabulary, without
+    # which the adapter passes vendor claims through and half the domain
+    # governance never runs.
     control_plane.ingestion.ingest_all(
-        [SyntheticSource(), MCPCallLogSource(SAMPLE_LOG)]
+        [
+            SyntheticSource(),
+            MCPCallLogSource(
+                SAMPLE_LOG,
+                tenant_id=control_plane.tenant_id,
+                domains=control_plane.registry.data_domains,
+            ),
+        ]
     )
     return control_plane
 
@@ -68,13 +79,16 @@ def test_duplicate_agent_ids_rejected(tmp_path: Path) -> None:
 
 
 def test_ingest_persists_and_evaluates(control_plane: ControlPlane) -> None:
+    tenant = control_plane.tenant_id
     result = control_plane.ingestion.ingest(SyntheticSource())
 
     assert result.fetched == result.written > 0
     assert result.duplicates == 0
-    assert control_plane.repository.count_events() == result.written
+    assert control_plane.repository.count_events(tenant) == result.written
     assert result.violations > 0
-    assert control_plane.repository.list_policy_results(correlation_id=result.correlation_ids[0])
+    assert control_plane.repository.list_policy_results(
+        tenant, correlation_id=result.correlation_ids[0]
+    )
 
 
 def test_ingest_is_idempotent(control_plane: ControlPlane) -> None:
@@ -83,62 +97,82 @@ def test_ingest_is_idempotent(control_plane: ControlPlane) -> None:
 
     assert second.written == 0
     assert second.duplicates == second.fetched
-    assert control_plane.repository.count_events() == first.written
+    assert control_plane.repository.count_events(control_plane.tenant_id) == first.written
 
 
 def test_reevaluation_replaces_results_rather_than_accumulating(
     control_plane: ControlPlane,
 ) -> None:
+    tenant = control_plane.tenant_id
     control_plane.ingestion.ingest(SyntheticSource())
-    before = len(control_plane.repository.list_policy_results())
+    before = len(control_plane.repository.list_policy_results(tenant))
     control_plane.ingestion.evaluate_everything()
-    assert len(control_plane.repository.list_policy_results()) == before
+    assert len(control_plane.repository.list_policy_results(tenant)) == before
 
 
 def test_ingestion_stamps_provenance(control_plane: ControlPlane) -> None:
     control_plane.ingestion.ingest(SyntheticSource())
-    events = control_plane.repository.list_events(limit=5)
+    events = control_plane.repository.list_events(control_plane.tenant_id, limit=5)
     assert all(e.ingested_at is not None for e in events)
     assert all(e.source_adapter == "synthetic" for e in events)
 
 
 def test_two_sources_coexist(seeded: ControlPlane) -> None:
-    adapters = {e.source_adapter for e in seeded.repository.list_events()}
+    adapters = {e.source_adapter for e in seeded.repository.list_events(seeded.tenant_id)}
     assert adapters == {"synthetic", "mcp"}
 
 
+# -- tenancy --------------------------------------------------------------
+
+
+def test_a_second_tenant_boots_and_sees_none_of_the_first(
+    seeded: ControlPlane, settings: Settings
+) -> None:
+    """The shipped registries all belong to the default tenant, so a second
+    tenant starts empty — it must not fail to build, and must not read across."""
+    with build_control_plane(settings, tenant_id="acme") as acme:
+        assert acme.registry.agents == {}
+        assert acme.registry.data_domains.domains == {}
+        assert acme.repository.count_events("acme") == 0
+        assert acme.analytics.overview().total_events == 0
+
+    assert seeded.repository.count_events(seeded.tenant_id) > 0
+
+
 # -- policy outcomes on the real scenario ---------------------------------
+
+
+def _run_matching(cp: ControlPlane, fragment: str) -> str:
+    return next(c for c in cp.repository.list_correlation_ids(cp.tenant_id) if fragment in c)
 
 
 def _violation_names(cp: ControlPlane, correlation_id: str) -> set[str]:
     return {
         r.policy_name
         for r in cp.repository.list_policy_results(
-            correlation_id=correlation_id, violations_only=True
+            cp.tenant_id, correlation_id=correlation_id, violations_only=True
         )
     }
 
 
 def test_clean_runs_produce_no_violations(seeded: ControlPlane) -> None:
-    for correlation_id in seeded.repository.list_correlation_ids():
+    for correlation_id in seeded.repository.list_correlation_ids(seeded.tenant_id):
         if "clean" in correlation_id or "degraded" in correlation_id:
             assert _violation_names(seeded, correlation_id) == set(), correlation_id
 
 
 def test_governed_publish_passes_the_approval_rule(seeded: ControlPlane) -> None:
     """Proves the approval rule can pass, not just fire."""
-    run = next(
-        c for c in seeded.repository.list_correlation_ids() if "governed_publish" in c
-    )
+    run = _run_matching(seeded, "governed_publish")
     assert _violation_names(seeded, run) == set()
 
-    results = seeded.repository.list_policy_results(correlation_id=run)
+    results = seeded.repository.list_policy_results(seeded.tenant_id, correlation_id=run)
     approval = next(r for r in results if r.policy_name == "missing_human_approval")
     assert approval.passed
 
 
 def test_violation_run_trips_every_intended_rule(seeded: ControlPlane) -> None:
-    run = next(c for c in seeded.repository.list_correlation_ids() if "violation" in c)
+    run = _run_matching(seeded, "violation")
     assert _violation_names(seeded, run) == {
         "read_only_violation",
         "unauthorized_data_domain",
@@ -151,11 +185,11 @@ def test_violation_run_trips_every_intended_rule(seeded: ControlPlane) -> None:
 
 def test_retry_storm_is_one_finding_not_eight(seeded: ControlPlane) -> None:
     """Occurrence count belongs in the evidence, not in the violation count."""
-    run = next(c for c in seeded.repository.list_correlation_ids() if "violation" in c)
+    run = _run_matching(seeded, "violation")
     findings = [
         r
         for r in seeded.repository.list_policy_results(
-            correlation_id=run, violations_only=True
+            seeded.tenant_id, correlation_id=run, violations_only=True
         )
         if r.policy_name == "tool_not_allowlisted"
         and r.evidence["tool_name"] == "inventory.read_shipments"
@@ -166,11 +200,11 @@ def test_retry_storm_is_one_finding_not_eight(seeded: ControlPlane) -> None:
 
 
 def test_denied_write_still_recorded_as_critical(seeded: ControlPlane) -> None:
-    run = next(c for c in seeded.repository.list_correlation_ids() if "violation" in c)
+    run = _run_matching(seeded, "violation")
     finding = next(
         r
         for r in seeded.repository.list_policy_results(
-            correlation_id=run, violations_only=True
+            seeded.tenant_id, correlation_id=run, violations_only=True
         )
         if r.policy_name == "read_only_violation"
     )
@@ -181,7 +215,7 @@ def test_denied_write_still_recorded_as_critical(seeded: ControlPlane) -> None:
 
 
 def test_shadow_agent_is_the_only_finding_in_its_run(seeded: ControlPlane) -> None:
-    run = next(c for c in seeded.repository.list_correlation_ids() if "shadow" in c)
+    run = _run_matching(seeded, "shadow")
     assert _violation_names(seeded, run) == {"unregistered_agent"}
 
 
@@ -191,16 +225,36 @@ def test_mcp_run_catches_the_publish_attempt(seeded: ControlPlane) -> None:
         "tool_not_allowlisted",
         "unauthorized_data_domain",
         "missing_human_approval",
+        "unknown_data_domain",
     }
+
+
+def test_an_unclassifiable_resource_surfaces_as_our_gap_not_theirs(
+    seeded: ControlPlane,
+) -> None:
+    """`erp://returns/rma_queue` has no mapping rule. The finding says so, and
+    it is the one violation in the run we would not have blocked."""
+    finding = next(
+        r
+        for r in seeded.repository.list_policy_results(
+            seeded.tenant_id, correlation_id="mcp-analyst-2026-08-06", violations_only=True
+        )
+        if r.policy_name == "unknown_data_domain"
+    )
+    assert finding.evidence["reason"] == "no_mapping_rule"
+    assert finding.evidence["resources"] == ["erp://returns/rma_queue"]
+    assert finding.would_block is False
 
 
 def test_every_rule_reports_on_every_run(seeded: ControlPlane) -> None:
     """'No violations' must never be confusable with 'nobody checked'."""
     expected = {rule.name for rule in seeded.engine.rules}
-    for correlation_id in seeded.repository.list_correlation_ids():
+    for correlation_id in seeded.repository.list_correlation_ids(seeded.tenant_id):
         reported = {
             r.policy_name
-            for r in seeded.repository.list_policy_results(correlation_id=correlation_id)
+            for r in seeded.repository.list_policy_results(
+                seeded.tenant_id, correlation_id=correlation_id
+            )
         }
         assert reported == expected, correlation_id
 
@@ -211,8 +265,8 @@ def test_every_rule_reports_on_every_run(seeded: ControlPlane) -> None:
 def test_overview_adds_up(seeded: ControlPlane) -> None:
     o = seeded.analytics.overview()
 
-    assert o.total_events == seeded.repository.count_events()
-    assert o.total_runs == len(seeded.repository.list_correlation_ids())
+    assert o.total_events == seeded.repository.count_events(seeded.tenant_id)
+    assert o.total_runs == len(seeded.repository.list_correlation_ids(seeded.tenant_id))
     assert o.successful_runs + o.failed_runs == o.total_runs
     assert o.total_cost_usd > 0
     assert o.unregistered_agents == 1
@@ -222,11 +276,11 @@ def test_overview_adds_up(seeded: ControlPlane) -> None:
 
 def test_a_recovered_retry_does_not_mark_the_run_failed(seeded: ControlPlane) -> None:
     """Run status follows the terminal event, not any failure inside it."""
-    run = next(c for c in seeded.repository.list_correlation_ids() if "degraded" in c)
+    run = _run_matching(seeded, "degraded")
     summary = seeded.analytics.run_summary(run)
     assert summary is not None
     assert summary.ok is True
-    events = seeded.repository.list_events(correlation_id=run)
+    events = seeded.repository.list_events(seeded.tenant_id, correlation_id=run)
     assert any(e.status.value == "timeout" for e in events)
 
 
@@ -260,7 +314,13 @@ def test_cost_by_agent_ranks_the_forecaster_first(seeded: ControlPlane) -> None:
 def test_platform_breakdown_covers_every_platform_seen(seeded: ControlPlane) -> None:
     by_platform = seeded.analytics.events_by_platform()
     assert set(by_platform) == {"local", "mcp", "snowflake", "other"}
-    assert sum(by_platform.values()) == seeded.repository.count_events()
+    assert sum(by_platform.values()) == seeded.repository.count_events(seeded.tenant_id)
+
+
+def test_cost_by_data_domain_ranks_by_spend(seeded: ControlPlane) -> None:
+    spend = seeded.analytics.cost_by_data_domain()
+    assert list(spend.values()) == sorted(spend.values(), reverse=True)
+    assert set(spend) <= set(seeded.registry.data_domains.domains) | {UNKNOWN_DATA_DOMAIN}
 
 
 def test_violations_sorted_worst_first(seeded: ControlPlane) -> None:
@@ -271,7 +331,7 @@ def test_violations_sorted_worst_first(seeded: ControlPlane) -> None:
 
 
 def test_chain_inspection_reaches_the_leaf(seeded: ControlPlane) -> None:
-    run = next(c for c in seeded.repository.list_correlation_ids() if "clean" in c)
+    run = _run_matching(seeded, "clean")
     chain = seeded.analytics.chain(run)
     assert chain is not None
 

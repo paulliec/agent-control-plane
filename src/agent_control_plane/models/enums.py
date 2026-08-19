@@ -87,6 +87,32 @@ class AccessScopeMode(StrEnum):
     ALLOWLIST = "allowlist"
 
 
+class Decision(StrEnum):
+    """What an enforcement point *would* do about a finding.
+
+    The product is observe-only: nothing in this codebase acts on a Decision.
+    It exists so rules can express intent now, and so a future enforcement
+    gateway can consume the same rules without them being rewritten.
+
+    Observation and enforcement have genuinely different obligations — see
+    docs/ARCHITECTURE.md — which is exactly why the decision is recorded
+    separately from the act of enforcing it.
+    """
+
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+class DataSensitivity(StrEnum):
+    """How badly it hurts if the wrong agent reads this domain."""
+
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+
 class Severity(StrEnum):
     """Ordered low -> critical. Use `Severity.rank` for comparisons."""
 
