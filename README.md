@@ -92,8 +92,24 @@ No cloud credentials are needed for anything in this repo.
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
-.venv\Scripts\python.exe -m pytest --cov=agent_control_plane --cov-report=term-missing
+.venv\Scripts\python.exe -m pytest --cov          # with the coverage gate
 ```
+
+## Quality gates
+
+The same four commands run locally and in CI, configured once in
+`pyproject.toml` so they cannot disagree:
+
+```powershell
+.venv\Scripts\python.exe -m ruff format --check .
+.venv\Scripts\python.exe -m ruff check .
+.venv\Scripts\python.exe -m mypy --strict         # src + tests + scripts
+.venv\Scripts\python.exe -m pytest --cov          # fails under 96%
+```
+
+`.github/workflows/ci.yml` runs those on every pull request and every push to
+`main`, then seeds the demo and exercises the CLI. One job, Python 3.12, no
+matrix — nothing here needs credentials or network, which is what keeps it fast.
 
 ## Generate sample data
 
@@ -268,6 +284,7 @@ src/agent_control_plane/
 config/          agent, tool + data-domain registries (governance intent)
 data/samples/    committed fixture input (sample MCP gateway log)
 docs/            ARCHITECTURE.md, QUESTIONS_FOR_PAUL.md
+.github/         CI workflow
 tests/
 ```
 

@@ -258,41 +258,57 @@ Related to Q16. A finding is reproducible only against the current code.
 **Recommendation:** add `ruleset_version` to `PolicyResult` when rules start
 changing regularly. **Cost:** 🟢
 
-### Q18. `ruff format` is not enforced — **still yours to decide**
-`ruff check` passes clean over `src`, `tests`, `scripts`. `ruff format --check`
-now reports **19 files would be reformatted, 19 already formatted** — so the repo
-is currently in exactly the half-formatted state this question warned about, and
-the split is getting worse, not better.
+### Q18. `ruff format` — **adopted**
+→ **Resolved.** Applied wholesale in one mechanical commit (`ruff format .`),
+which is the option this question recommended. The repo had drifted to 20
+unformatted files against 21 formatted — precisely the half-formatted state
+flagged as the one outcome worse than either choice.
 
-I did not run it. You asked me to move Q8/Q10/Q21/Q22 to resolved and this was
-not on that list, and reformatting 19 files on top of a rename-heavy diff would
-make the substantive changes much harder to review.
+Verified mechanical rather than assumed: every changed `.py` file was parsed
+before and after and the ASTs compared — 19 files changed, 0 AST differences.
+The 20th changed file is `docs/ARCHITECTURE.md`, where ruff 0.16 formats the
+Python code block in the `PolicyRule` snippet.
 
-**Recommendation unchanged, and now overdue:** adopt it wholesale in one isolated
-mechanical commit (`ruff format src tests scripts`, tests confirm nothing moved),
-or delete the aspiration. Either is fine. The current state is the one option
-that is not. **Cost:** 🟢 now, 🟡 later.
+`ruff format --check .` is now a CI gate, so it cannot drift again. 🟢
 
 ### Q19. No CI
-Tests, lint and a seed run are all one command each. There's no GitHub Actions
-workflow.
+→ **Resolved.** `.github/workflows/ci.yml`: one job on pull requests and pushes
+to `main`, running format, lint, `mypy --strict`, `pytest --cov`, the seed
+demo, and the five CLI commands.
 
-**Recommendation:** add one in Tollgate 2 — it's ~20 lines and this repo is
-already credential-free and deterministic, which is exactly what makes CI easy.
-**Cost:** 🟢
+**One decision worth your attention:** no matrix, and pinned to **3.12**. Every
+tool config in the repo already says 3.12 (`requires-python`, ruff
+`target-version`, mypy `python_version`), so that is what the project claims to
+support. But it is developed on 3.13, which CI therefore never exercises. If
+3.13 is the real deployment target, either say so in `requires-python` or add
+the second interpreter — right now the declared floor and the actual dev
+environment disagree, and CI follows the declaration. 🟢
 
-### Q20. `mypy --strict` — now clean, but only over `src`
-**Update (Tollgate 2):** green. `Success: no issues found in 26 source files`.
-It caught one real defect on the way: `cost_by_data_domain` accumulated floats
-into a `Counter[str]`, which is int-typed.
+**Coverage:** configured in `pyproject.toml`, not in the CI command, so the gate
+is identical locally and in CI. `fail_under = 96` sits just under the current
+96.87% — tight enough to catch a real regression, loose enough not to fail on a
+fractional shift. Deliberately *not* in `pytest addopts`: a plain `pytest` stays
+fast and ungated.
 
-**Still open:** the config sets `packages = ["agent_control_plane"]`, so `tests/`
-and `scripts/` are unchecked. Test code is where a wrong type is most likely to
-mean a test that passes vacuously.
+### Q20. `mypy --strict` scope
+→ **Resolved.** Now covers `src`, `tests` and `scripts` — 38 files, clean, with
+no new `type: ignore` comments and no production code changed to satisfy it.
 
-**Recommendation:** extend the check to `tests` when you add CI (Q19), not
-before — it will surface a batch of fixture annotations and that is better
-handled in one pass. **Cost:** 🟢
+Extending it found six things, two of which were real rather than cosmetic:
+
+- The `repo` and `control_plane` yield-fixtures in `conftest.py` were annotated
+  with the yielded type instead of `Iterator[...]`. Simply wrong as written.
+- The `Exploding` test double stopped satisfying `PolicyRule` when the protocol
+  gained `decision`, so the "a broken rule does not void the evaluation" test
+  was asserting engine behaviour about something that is not a rule. It now
+  carries a decision and is bound to `PolicyRule` so the protocol is checked
+  rather than assumed.
+
+The rest were a bare `list` annotation, a `platform="local"` string where the
+enum is declared, and one `type: ignore` mypy now reports as unused.
+
+**Earlier note, now settled:** the concern was that this would need a batch of
+fixture churn. It did not — six errors, all fixed at the site. 🟢
 
 ---
 
