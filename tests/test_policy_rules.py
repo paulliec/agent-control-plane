@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import timedelta
 
 import pytest
@@ -12,7 +13,7 @@ from agent_control_plane.models.enums import (
     Severity,
     Status,
 )
-from agent_control_plane.models.event import AgentEvent, build_chain
+from agent_control_plane.models.event import AgentEvent, ExecutionChain, build_chain
 from agent_control_plane.services.policy_engine import (
     Finding,
     PolicyContext,
@@ -444,11 +445,13 @@ def test_a_broken_rule_does_not_void_the_evaluation(ctx: PolicyContext) -> None:
         name = "exploding"
         severity = Severity.LOW
         description = "always throws"
+        decision = Decision.ALLOW
 
-        def evaluate(self, chain, ctx):  # type: ignore[no-untyped-def]
+        def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]:
             raise RuntimeError("boom")
 
-    engine = PolicyEngine([Exploding(), ReadOnlyViolationRule()])
+    broken: PolicyRule = Exploding()
+    engine = PolicyEngine([broken, ReadOnlyViolationRule()])
     report = engine.evaluate(build_chain("run-1", [make_event(action=ActionType.WRITE)]), ctx)
 
     assert [v.policy_name for v in report.violations] == ["read_only_violation"]

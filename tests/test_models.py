@@ -58,7 +58,7 @@ def test_unknown_field_rejected() -> None:
 def test_events_are_immutable() -> None:
     event = make_event()
     with pytest.raises(ValidationError):
-        event.status = Status.FAILURE  # type: ignore[misc]
+        event.status = Status.FAILURE
 
 
 def test_fingerprint_is_stable_and_content_sensitive() -> None:

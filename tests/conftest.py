@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def repo(tmp_path: Path) -> SQLiteRepository:
+def repo(tmp_path: Path) -> Iterator[SQLiteRepository]:
     repository = SQLiteRepository(tmp_path / "events.db")
     repository.initialise()
     yield repository
@@ -66,7 +67,7 @@ def shipped_registry() -> Registry:
 
 
 @pytest.fixture
-def control_plane(settings: Settings) -> ControlPlane:
+def control_plane(settings: Settings) -> Iterator[ControlPlane]:
     with build_control_plane(settings) as cp:
         yield cp
 

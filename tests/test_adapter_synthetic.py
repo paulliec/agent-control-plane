@@ -12,7 +12,7 @@ from agent_control_plane.adapters.synthetic import (
     generate_events,
 )
 from agent_control_plane.models.enums import ActionType, ActorType, EventType, Platform, Status
-from agent_control_plane.models.event import build_chain
+from agent_control_plane.models.event import AgentEvent, build_chain
 
 
 def test_source_satisfies_the_protocol() -> None:
@@ -52,7 +52,7 @@ def test_every_parent_reference_resolves() -> None:
 
 def test_each_run_has_exactly_one_root() -> None:
     events = generate_events()
-    by_run: dict[str, list] = {}
+    by_run: dict[str, list[AgentEvent]] = {}
     for event in events:
         by_run.setdefault(event.correlation_id, []).append(event)
     for correlation_id, run_events in by_run.items():

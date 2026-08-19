@@ -10,7 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from agent_control_plane.models.agent import AccessScope, Agent, AgentGovernance
-from agent_control_plane.models.enums import AccessMode, AccessScopeMode
+from agent_control_plane.models.enums import AccessMode, AccessScopeMode, Platform
 from agent_control_plane.registry import load_registry
 
 
@@ -105,7 +105,7 @@ def test_agent_registry_roundtrips_through_yaml(tmp_path: Path) -> None:
     agent = Agent(
         agent_id="a1",
         name="A",
-        platform="local",
+        platform=Platform.LOCAL,
         governance=AgentGovernance(
             access_mode=AccessMode.READ_WRITE,
             tool_access=AccessScope.allowlist("t1"),

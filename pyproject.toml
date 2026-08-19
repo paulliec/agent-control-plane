@@ -48,7 +48,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
 python_version = "3.12"
-packages = ["agent_control_plane"]
+# Tests and scripts are checked too: a fixture with a wrong type is how a test
+# passes vacuously. mypy_path lets them resolve the package from src/.
+files = ["src", "tests", "scripts"]
 mypy_path = "src"
 strict = true
 warn_unused_ignores = true
