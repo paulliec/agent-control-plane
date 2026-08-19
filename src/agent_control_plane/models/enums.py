@@ -137,6 +137,4 @@ _SEVERITY_RANK: dict[Severity, int] = {
 
 # Actions that mutate state. Kept here so the read-only rule and the tool
 # registry agree on what "write" means.
-MUTATING_ACTIONS: frozenset[ActionType] = frozenset(
-    {ActionType.WRITE, ActionType.DELETE}
-)
+MUTATING_ACTIONS: frozenset[ActionType] = frozenset({ActionType.WRITE, ActionType.DELETE})

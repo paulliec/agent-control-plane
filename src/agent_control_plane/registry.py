@@ -94,14 +94,13 @@ def load_registry(
         tenant_id=tenant_id,
         agents={a.agent_id: a for a in agents},
         tools={t.tool_name: t for t in tools},
-        data_domains=load_data_domains(domains_file, tenant_id) if domains_file else
-        DataDomainRegistry(),
+        data_domains=load_data_domains(domains_file, tenant_id)
+        if domains_file
+        else DataDomainRegistry(),
     )
 
 
-def load_data_domains(
-    path: Path | None, tenant_id: str = DEFAULT_TENANT_ID
-) -> DataDomainRegistry:
+def load_data_domains(path: Path | None, tenant_id: str = DEFAULT_TENANT_ID) -> DataDomainRegistry:
     if path is None or not path.exists():
         return DataDomainRegistry()
 
@@ -120,9 +119,7 @@ def load_data_domains(
     if orphans := sorted({m.domain for m in mappings} - known):
         raise RegistryError(f"{path}: mappings reference undeclared domains: {orphans}")
 
-    return DataDomainRegistry(
-        domains={d.name: d for d in domains}, mappings=tuple(mappings)
-    )
+    return DataDomainRegistry(domains={d.name: d for d in domains}, mappings=tuple(mappings))
 
 
 def _duplicates(values: list[str]) -> set[str]:

@@ -147,14 +147,10 @@ def vocabulary() -> DataDomainRegistry:
     ]
     mappings = [
         DomainMapping(platform=Platform.SNOWFLAKE, pattern="SALES.*.*", domain="sales"),
-        DomainMapping(
-            platform=Platform.SNOWFLAKE, pattern="SALES.PUBLIC.*", domain="finance"
-        ),
+        DomainMapping(platform=Platform.SNOWFLAKE, pattern="SALES.PUBLIC.*", domain="finance"),
         DomainMapping(platform=Platform.MCP, pattern="ERP://HR/*", domain="hr"),
     ]
-    return DataDomainRegistry(
-        domains={d.name: d for d in domains}, mappings=tuple(mappings)
-    )
+    return DataDomainRegistry(domains={d.name: d for d in domains}, mappings=tuple(mappings))
 
 
 @pytest.fixture

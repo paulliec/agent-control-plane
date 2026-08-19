@@ -286,9 +286,7 @@ def test_a_recovered_retry_does_not_mark_the_run_failed(seeded: ControlPlane) ->
 
 def test_recent_runs_are_newest_first(seeded: ControlPlane) -> None:
     runs = seeded.analytics.recent_runs()
-    assert [r.started_at for r in runs] == sorted(
-        (r.started_at for r in runs), reverse=True
-    )
+    assert [r.started_at for r in runs] == sorted((r.started_at for r in runs), reverse=True)
     worst = next(r for r in runs if "violation" in r.correlation_id)
     assert worst.max_severity is Severity.CRITICAL
     assert worst.ok is False
@@ -296,11 +294,10 @@ def test_recent_runs_are_newest_first(seeded: ControlPlane) -> None:
 
 def test_top_tools_ranks_by_call_count(seeded: ControlPlane) -> None:
     tools = seeded.analytics.top_tools(5)
-    assert [t.call_count for t in tools] == sorted(
-        (t.call_count for t in tools), reverse=True
+    assert [t.call_count for t in tools] == sorted((t.call_count for t in tools), reverse=True)
+    shipments = next(
+        t for t in seeded.analytics.top_tools(20) if t.tool_name == "inventory.read_shipments"
     )
-    shipments = next(t for t in seeded.analytics.top_tools(20)
-                     if t.tool_name == "inventory.read_shipments")
     assert shipments.failure_count > 0
 
 

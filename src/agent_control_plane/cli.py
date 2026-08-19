@@ -48,9 +48,7 @@ def cmd_seed(cp: ControlPlane, args: argparse.Namespace) -> int:
     mcp_log = Path(args.mcp_log) if args.mcp_log else _default_mcp_log(cp)
     if mcp_log.exists():
         sources.append(
-            MCPCallLogSource(
-                mcp_log, tenant_id=cp.tenant_id, domains=cp.registry.data_domains
-            )
+            MCPCallLogSource(mcp_log, tenant_id=cp.tenant_id, domains=cp.registry.data_domains)
         )
     else:
         print(f"! no MCP log at {mcp_log}, skipping that source")
@@ -124,8 +122,10 @@ def cmd_trace(cp: ControlPlane, args: argparse.Namespace) -> int:
         print(f"no such run: {args.correlation_id}", file=sys.stderr)
         return 1
 
-    print(f"run {chain.correlation_id}  cost=${chain.total_cost_usd:.4f}  "
-          f"agents={', '.join(chain.agent_ids)}\n")
+    print(
+        f"run {chain.correlation_id}  cost=${chain.total_cost_usd:.4f}  "
+        f"agents={', '.join(chain.agent_ids)}\n"
+    )
     for depth, event in chain.walk():
         mark = _TREE_MARK.get(event.event_type, "?")
         label = event.tool_name or event.resource or event.action.value
@@ -134,10 +134,7 @@ def cmd_trace(cp: ControlPlane, args: argparse.Namespace) -> int:
         # Pad the indent+marker as one unit so the agent column stays aligned
         # however deep the tree goes.
         prefix = f"{'  ' * depth}{mark}"
-        print(
-            f"{prefix:<20}{event.agent_id:<28} {label}{domain}"
-            f"  {event.status.value}{cost}"
-        )
+        print(f"{prefix:<20}{event.agent_id:<28} {label}{domain}  {event.status.value}{cost}")
 
     violations = cp.repository.list_policy_results(
         cp.tenant_id, correlation_id=args.correlation_id, violations_only=True

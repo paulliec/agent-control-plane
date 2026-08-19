@@ -673,6 +673,4 @@ def generate_events(
     tenant_id: str = DEFAULT_TENANT_ID,
 ) -> list[AgentEvent]:
     """Convenience for tests and scripts."""
-    return list(
-        SyntheticSource(seed=seed, schedule=schedule, tenant_id=tenant_id).fetch()
-    )
+    return list(SyntheticSource(seed=seed, schedule=schedule, tenant_id=tenant_id).fetch())

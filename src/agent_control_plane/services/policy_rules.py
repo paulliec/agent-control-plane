@@ -432,9 +432,7 @@ class ToolCallVolumeRule:
         for agent_id, count in calls.items():
             gov = _governance(ctx, agent_id)
             limit = (
-                gov.max_tool_calls
-                if gov.max_tool_calls is not None
-                else ctx.default_max_tool_calls
+                gov.max_tool_calls if gov.max_tool_calls is not None else ctx.default_max_tool_calls
             )
             if limit is None or count <= limit:
                 continue

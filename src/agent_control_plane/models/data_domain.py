@@ -99,9 +99,7 @@ class DataDomainRegistry(BaseModel):
         """
         if not resource:
             return UNKNOWN_DATA_DOMAIN
-        candidates = [
-            m for m in self.mappings if m.platform is platform and m.matches(resource)
-        ]
+        candidates = [m for m in self.mappings if m.platform is platform and m.matches(resource)]
         if not candidates:
             return UNKNOWN_DATA_DOMAIN
         best = max(candidates, key=lambda m: m.specificity)

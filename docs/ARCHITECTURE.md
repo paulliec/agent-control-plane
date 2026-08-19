@@ -325,7 +325,8 @@ class PolicyRule(Protocol):
     name: str
     severity: Severity
     description: str
-    decision: Decision      # allow | deny | require_approval
+    decision: Decision  # allow | deny | require_approval
+
     def evaluate(self, chain: ExecutionChain, ctx: PolicyContext) -> Iterable[Finding]: ...
 ```
 

@@ -88,16 +88,31 @@ def _status(record: dict[str, Any]) -> tuple[Status, str | None, str | None]:
 
 
 _KNOWN_KEYS = {
-    "ts", "timestamp", "span_id", "parent_span_id", "trace_id", "session_id",
-    "server", "method", "params", "client", "op", "resource", "data_domain",
-    "duration_ms", "cost_usd", "result", "error", "status", "model",
-    "input_tokens", "output_tokens",
+    "ts",
+    "timestamp",
+    "span_id",
+    "parent_span_id",
+    "trace_id",
+    "session_id",
+    "server",
+    "method",
+    "params",
+    "client",
+    "op",
+    "resource",
+    "data_domain",
+    "duration_ms",
+    "cost_usd",
+    "result",
+    "error",
+    "status",
+    "model",
+    "input_tokens",
+    "output_tokens",
 }
 
 
-def classify_domain(
-    record: dict[str, Any], domains: DataDomainRegistry | None
-) -> str | None:
+def classify_domain(record: dict[str, Any], domains: DataDomainRegistry | None) -> str | None:
     """Vendor object -> controlled governance domain.
 
     The gateway's own ``data_domain`` string is treated as a *claim*, not an
@@ -228,9 +243,7 @@ class MCPCallLogSource:
         def mapper(record: dict[str, Any]) -> AgentEvent:
             return to_event(record, self.tenant_id, self.domains)
 
-        for event in normalize_all(
-            self.name, self._read_records(), mapper, strict=self.strict
-        ):
+        for event in normalize_all(self.name, self._read_records(), mapper, strict=self.strict):
             if since is None or event.timestamp >= since:
                 yield event
 

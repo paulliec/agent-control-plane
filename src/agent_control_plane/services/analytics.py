@@ -101,8 +101,7 @@ class AnalyticsService:
         for event in self._events():
             by_run.setdefault(event.correlation_id, []).append(event)
         return [
-            build_chain(cid, events, tenant_id=self.tenant_id)
-            for cid, events in by_run.items()
+            build_chain(cid, events, tenant_id=self.tenant_id) for cid, events in by_run.items()
         ]
 
     def chain(self, correlation_id: str) -> ExecutionChain | None:

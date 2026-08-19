@@ -152,9 +152,7 @@ class ExecutionChain(BaseModel):
     def _single_tenant(self) -> Self:
         foreign = {e.tenant_id for e in self.events} - {self.tenant_id}
         if foreign:
-            raise ValueError(
-                f"chain {self.correlation_id} mixes tenants: {sorted(foreign)}"
-            )
+            raise ValueError(f"chain {self.correlation_id} mixes tenants: {sorted(foreign)}")
         return self
 
     @property

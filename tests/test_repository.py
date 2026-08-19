@@ -214,9 +214,7 @@ def test_delete_policy_results(repo: SQLiteRepository) -> None:
 
 
 def test_delete_stops_at_the_tenant_boundary(repo: SQLiteRepository) -> None:
-    repo.save_policy_results(
-        [make_result(), make_result(tenant_id=OTHER_TENANT)]
-    )
+    repo.save_policy_results([make_result(), make_result(tenant_id=OTHER_TENANT)])
     assert repo.delete_policy_results(TENANT, "run-1") == 1
     assert len(repo.list_policy_results(OTHER_TENANT)) == 1
 

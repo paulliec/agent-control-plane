@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import timedelta
 
@@ -224,9 +224,7 @@ def test_unregistered_agent_falls_back_to_default_ceiling(ctx: PolicyContext) ->
 
 
 def test_excessive_tool_calls_fires(ctx: PolicyContext) -> None:
-    events = [
-        make_event(event_id=f"e{i}", timestamp=T0 + timedelta(seconds=i)) for i in range(5)
-    ]
+    events = [make_event(event_id=f"e{i}", timestamp=T0 + timedelta(seconds=i)) for i in range(5)]
     findings = _findings(ToolCallVolumeRule(), ctx, *events)
     assert len(findings) == 1
     assert findings[0].evidence["tool_call_count"] == 5
@@ -380,9 +378,10 @@ def test_a_domain_outside_the_vocabulary_fires_with_a_different_reason(
 
 
 def test_a_declared_domain_passes(ctx_with_vocabulary: PolicyContext) -> None:
-    assert _findings(
-        UnknownDataDomainRule(), ctx_with_vocabulary, make_event(data_domain="sales")
-    ) == []
+    assert (
+        _findings(UnknownDataDomainRule(), ctx_with_vocabulary, make_event(data_domain="sales"))
+        == []
+    )
 
 
 def test_no_vocabulary_means_nothing_to_be_unknown_against(ctx: PolicyContext) -> None:
@@ -394,9 +393,7 @@ def test_no_vocabulary_means_nothing_to_be_unknown_against(ctx: PolicyContext) -
 def test_an_event_touching_no_data_is_not_a_classification_gap(
     ctx_with_vocabulary: PolicyContext,
 ) -> None:
-    event = make_event(
-        data_domain=None, tool_name=None, event_type=EventType.AGENT_RUN_START
-    )
+    event = make_event(data_domain=None, tool_name=None, event_type=EventType.AGENT_RUN_START)
     assert _findings(UnknownDataDomainRule(), ctx_with_vocabulary, event) == []
 
 

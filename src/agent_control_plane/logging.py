@@ -17,8 +17,10 @@ _CONTEXT_KEY = "context"
 
 class KeyValueFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        base = f"{self.formatTime(record, '%Y-%m-%dT%H:%M:%S%z')} {record.levelname:<7} " \
-               f"{record.name} {record.getMessage()}"
+        base = (
+            f"{self.formatTime(record, '%Y-%m-%dT%H:%M:%S%z')} {record.levelname:<7} "
+            f"{record.name} {record.getMessage()}"
+        )
         ctx = getattr(record, _CONTEXT_KEY, None)
         if isinstance(ctx, dict) and ctx:
             base += " " + " ".join(f"{k}={_scalar(v)}" for k, v in ctx.items())

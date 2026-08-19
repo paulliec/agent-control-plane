@@ -91,18 +91,50 @@ CREATE INDEX IF NOT EXISTS idx_policy_passed      ON policy_results(tenant_id, p
 """
 
 _EVENT_COLUMNS = [
-    "tenant_id", "event_id", "timestamp", "platform", "agent_id", "agent_name",
-    "actor_id", "actor_type", "event_type", "action", "tool_name", "tool_server",
-    "resource", "data_domain", "status", "error_code", "error_message",
-    "duration_ms", "estimated_cost_usd", "model", "input_tokens", "output_tokens",
-    "parent_event_id", "correlation_id", "session_id", "source_adapter",
-    "ingested_at", "metadata",
+    "tenant_id",
+    "event_id",
+    "timestamp",
+    "platform",
+    "agent_id",
+    "agent_name",
+    "actor_id",
+    "actor_type",
+    "event_type",
+    "action",
+    "tool_name",
+    "tool_server",
+    "resource",
+    "data_domain",
+    "status",
+    "error_code",
+    "error_message",
+    "duration_ms",
+    "estimated_cost_usd",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "parent_event_id",
+    "correlation_id",
+    "session_id",
+    "source_adapter",
+    "ingested_at",
+    "metadata",
 ]
 
 _POLICY_COLUMNS = [
-    "tenant_id", "result_id", "policy_name", "severity", "passed", "decision",
-    "enforced", "correlation_id", "event_id", "agent_id", "explanation",
-    "evidence", "evaluated_at",
+    "tenant_id",
+    "result_id",
+    "policy_name",
+    "severity",
+    "passed",
+    "decision",
+    "enforced",
+    "correlation_id",
+    "event_id",
+    "agent_id",
+    "explanation",
+    "evidence",
+    "evaluated_at",
 ]
 
 
@@ -180,10 +212,7 @@ class SQLiteRepository:
         if not events:
             return 0
         placeholders = ", ".join("?" * len(_EVENT_COLUMNS))
-        sql = (
-            f"INSERT OR IGNORE INTO events ({', '.join(_EVENT_COLUMNS)}) "
-            f"VALUES ({placeholders})"
-        )
+        sql = f"INSERT OR IGNORE INTO events ({', '.join(_EVENT_COLUMNS)}) VALUES ({placeholders})"
         tenants = {e.tenant_id for e in events}
         before = sum(self.count_events(t) for t in tenants)
         with self.conn:
@@ -264,9 +293,7 @@ class SQLiteRepository:
     def list_tenants(self) -> list[str]:
         return [
             str(r["tenant_id"])
-            for r in self.conn.execute(
-                "SELECT DISTINCT tenant_id FROM events ORDER BY tenant_id"
-            )
+            for r in self.conn.execute("SELECT DISTINCT tenant_id FROM events ORDER BY tenant_id")
         ]
 
     # -- policy results ---------------------------------------------------

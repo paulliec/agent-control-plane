@@ -158,8 +158,11 @@ def test_violation_run_contains_all_four_intended_transgressions() -> None:
     # 4. cost blowout
     assert max(e.estimated_cost_usd or 0 for e in events) > 2.0
     # ...and the run ends badly
-    end = next(e for e in events if e.event_type is EventType.AGENT_RUN_END
-               and e.agent_id == "agt_forecast_weekly")
+    end = next(
+        e
+        for e in events
+        if e.event_type is EventType.AGENT_RUN_END and e.agent_id == "agt_forecast_weekly"
+    )
     assert end.status is Status.FAILURE
 
 

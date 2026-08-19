@@ -36,8 +36,9 @@ def test_seed_reports_both_sources(db: str, capsys: pytest.CaptureFixture[str]) 
     assert Path(db).exists()
 
 
-def test_seed_without_an_mcp_log_still_works(db: str, tmp_path: Path,
-                                             capsys: pytest.CaptureFixture[str]) -> None:
+def test_seed_without_an_mcp_log_still_works(
+    db: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A missing optional source should degrade, not crash."""
     assert _run(db, "seed", "--mcp-log", str(tmp_path / "nope.jsonl")) == 0
     out = capsys.readouterr().out

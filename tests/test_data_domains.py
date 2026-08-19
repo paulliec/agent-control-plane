@@ -93,9 +93,7 @@ def test_an_empty_registry_classifies_everything_as_unknown() -> None:
 
 def test_specificity_prefers_fewer_wildcards_then_length() -> None:
     broad = DomainMapping(platform=Platform.SNOWFLAKE, pattern="SALES.*.*", domain="sales")
-    narrow = DomainMapping(
-        platform=Platform.SNOWFLAKE, pattern="SALES.PUBLIC.*", domain="sales"
-    )
+    narrow = DomainMapping(platform=Platform.SNOWFLAKE, pattern="SALES.PUBLIC.*", domain="sales")
     exact = DomainMapping(
         platform=Platform.SNOWFLAKE, pattern="SALES.PUBLIC.FCT_ORDERS", domain="sales"
     )

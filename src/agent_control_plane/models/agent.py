@@ -112,9 +112,7 @@ class AgentGovernance(BaseModel):
             if mode is None and allowed is None:
                 continue
             if field_name in out:
-                raise ValueError(
-                    f"specify either {field_name} or {prefix}/{list_key}, not both"
-                )
+                raise ValueError(f"specify either {field_name} or {prefix}/{list_key}, not both")
             if mode is None:
                 # A list without a mode is exactly the ambiguity we are removing.
                 raise ValueError(f"{list_key} requires an explicit {prefix}")
