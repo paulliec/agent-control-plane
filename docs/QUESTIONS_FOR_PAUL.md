@@ -19,6 +19,66 @@ Implemented in `models/agent.py`, documented in `ARCHITECTURE.md`, tested in
 
 ---
 
+## Resolved during Tollgate 2
+
+These were open questions above; the code now answers them. Kept here rather
+than deleted so the reasoning survives.
+
+### Q8 (resolved). `tenant_id` is now on everything
+**Decision taken:** added, and made *required* — no model default. It sits on
+`AgentEvent`, `PolicyResult`, `ExecutionChain`, `PolicyReport` and every registry
+entry. Every repository read takes it as a positional argument (`list_tenants()`
+is the one deliberate exception, for admin tooling); both tables are keyed on
+`(tenant_id, …)` and every index leads with it.
+
+**Why now rather than later:** it cost one column while the tables were empty.
+The recommendation in the original question was "add it now *if* multi-tenant is
+on the roadmap at all", and the cost of being wrong in this direction is a spare
+column, while the cost of being wrong in the other is a migration over real audit
+data.
+
+**What it buys beyond storage:** `build_chain` rejects mixed-tenant batches
+outright, and `fingerprint` includes the tenant, so deduplication cannot merge
+across the boundary. One `ControlPlane` serves one tenant; serving several means
+building several.
+
+**Still your call:** nothing enforces that the *caller* is entitled to the tenant
+it asks for. That is an authn/authz concern and there is no auth layer here yet.
+Today's guarantee is "no accidental bleed", not "no malicious access". 🟡
+
+### Q10 (resolved). `data_domain` is a controlled vocabulary
+**Decision taken:** the `data_domains.yaml` registry the original question
+recommended, plus the `unknown_data_domain` rule. Domains carry a `sensitivity`
+and an owner; glob mapping rules turn vendor objects into governance terms, most
+specific wins, and a mapping onto an undeclared domain fails at load.
+
+**One thing that fell out of building it:** the vendor's own `data_domain` field
+had to become a *claim* rather than an answer, otherwise any gateway could invent
+a classification the policy engine would then trust. It now survives only if it
+is in the vocabulary, and a mapping rule beats it.
+
+**And one bug the demo surfaced:** with `unknown` treated as an ordinary domain,
+`unauthorized_data_domain` fired on it — a HIGH would-block finding against an
+agent for touching a domain nobody could have been allowlisted for. It now skips
+`unknown` and lets `unknown_data_domain` (medium, allow) own that case. An
+unclassified object is our gap, not theirs.
+
+**Still your call:** `sensitivity` is declared but no rule reads it yet. The
+obvious use is a rule like "restricted data requires an approval regardless of
+allowlist". Cheap to add once you say what the ladder should mean. 🟢
+
+### Q21 / Q22 (resolved). Package and naming
+**Decision taken:** `agentops` → `agent_control_plane`, console script
+`agentops` → `acp`, env prefix `AGENTOPS_` → `ACP_`. Git tracked it as renames,
+so history survived.
+
+This settles the PyPI collision Q21 raised. Q22's directory-name mismatch is
+unchanged and remains cosmetic — the folder is still `agent control plane` with
+spaces, which only makes shell quoting fiddly on Windows. Rename it whenever it
+starts to annoy; nothing depends on it. 🟢
+
+---
+
 ## 1. Product / governance
 
 ### Q1. What is a "violation" — one per event, or one per problem?
@@ -47,6 +107,12 @@ for "attempted but blocked".
 
 **Recommendation:** keep as-is, but consider a `blocked` flag on the finding so
 a dashboard can show "attempted vs succeeded" separately. **Cost:** 🟢
+
+**Note:** `would_block` (added for Q6) is *not* this flag and shouldn't be
+mistaken for it. It means "a gateway should have stopped this"; you are asking
+for "a gateway did stop this". The second is derivable from the evidence today —
+findings carry a `statuses` breakdown, so `{"denied": 1}` is the signal — it just
+isn't surfaced as a first-class field.
 
 ### Q3. What governance applies to an unregistered (shadow) agent?
 **Why it matters:** it decides whether shadow agents produce one finding or
@@ -86,9 +152,21 @@ Everything here is after-the-fact. The obvious next step — a pre-flight
 `check(event) -> allow/deny` an MCP gateway could call — is a materially
 different product with latency and availability requirements.
 
-**Recommendation:** stay observe-only through Tollgate 2. Flag it if enforcement
-is the actual goal, because it changes deployment shape. **Cost:** 🔴 not the
-rules, but the operational commitments around them.
+**Update (Tollgate 2):** still observe-only, but rules now *record* what a
+gateway should have done. Each rule carries a `decision` (`allow` / `deny` /
+`require_approval`) and each violating result exposes `would_block`. The seed run
+reports `violations=9 would_block=9` on the bad run versus `violations=1
+would_block=0` on the shadow-agent run.
+
+`PolicyResult.enforced` exists and is rejected by a validator if ever set True —
+an audit trail that claims something was blocked when nothing was is worse than
+no audit trail. Flipping that guard is the moment this becomes a different
+product, and it should be a deliberate decision, not a config change.
+
+**Recommendation unchanged:** stay observe-only. But the `would_block` numbers
+are now the cheapest way to find out what enforcement *would* have cost you
+before committing to it — worth looking at before Tollgate 3. **Cost:** 🔴 not
+the rules, but the operational commitments around them.
 
 ---
 
@@ -105,11 +183,7 @@ point — it forces a conscious mapping decision.
 data exists is 🔴. Staying closed now keeps the cheap option open.
 
 ### Q8. No `tenant_id` on `AgentEvent`
-Single-tenant assumed. Multi-tenant later means a migration and a filter on
-every query.
-
-**Recommendation:** add it now *if* multi-tenant is on the roadmap at all — it
-costs one nullable column today. **Cost:** 🟡 now, 🔴 after real data.
+→ **Resolved in Tollgate 2.** See the resolved section above.
 
 ### Q9. Cost is a number with no currency or pricing provenance
 `estimated_cost_usd` is a float. No record of which price list produced it, and
@@ -120,12 +194,7 @@ a dashboard number, add `pricing_version` and keep raw units (credits, tokens)
 alongside. **Cost:** 🟡
 
 ### Q10. `data_domain` is a free string
-Deliberately not an enum — domains are customer-specific taxonomy. But nothing
-validates that an event's domain exists in any registry, so a typo
-(`inventry`) silently becomes an unauthorized-domain violation.
-
-**Recommendation:** add a `data_domains.yaml` registry and a `unknown_data_domain`
-rule. Cheap and catches real config drift. **Cost:** 🟢
+→ **Resolved in Tollgate 2.** See the resolved section above.
 
 ### Q11. Cross-run causality
 A chain is one `correlation_id`. If run B is scheduled by run A, nothing links
@@ -189,14 +258,20 @@ Related to Q16. A finding is reproducible only against the current code.
 **Recommendation:** add `ruleset_version` to `PolicyResult` when rules start
 changing regularly. **Cost:** 🟢
 
-### Q18. `ruff format` is not enforced
-`ruff check` passes clean and runs on `src`, `tests`, `scripts`.
-`ruff format --check` would reformat 13 files — mostly re-wrapping deliberate
-alignment. I didn't run it rather than churn the diff on day one.
+### Q18. `ruff format` is not enforced — **still yours to decide**
+`ruff check` passes clean over `src`, `tests`, `scripts`. `ruff format --check`
+now reports **19 files would be reformatted, 19 already formatted** — so the repo
+is currently in exactly the half-formatted state this question warned about, and
+the split is getting worse, not better.
 
-**Recommendation:** decide now, before the codebase grows: either adopt
-`ruff format` wholesale in one commit, or drop it. Half-formatted is the worst
-option. **Cost:** 🟢 now, 🟡 later (a large mechanical diff).
+I did not run it. You asked me to move Q8/Q10/Q21/Q22 to resolved and this was
+not on that list, and reformatting 19 files on top of a rename-heavy diff would
+make the substantive changes much harder to review.
+
+**Recommendation unchanged, and now overdue:** adopt it wholesale in one isolated
+mechanical commit (`ruff format src tests scripts`, tests confirm nothing moved),
+or delete the aspiration. Either is fine. The current state is the one option
+that is not. **Cost:** 🟢 now, 🟡 later.
 
 ### Q19. No CI
 Tests, lint and a seed run are all one command each. There's no GitHub Actions
@@ -206,32 +281,29 @@ workflow.
 already credential-free and deterministic, which is exactly what makes CI easy.
 **Cost:** 🟢
 
-### Q20. `mypy --strict` is configured but not clean
-`pyproject.toml` has a strict mypy block; I haven't run it to green. Type hints
-are thorough but unverified.
+### Q20. `mypy --strict` — now clean, but only over `src`
+**Update (Tollgate 2):** green. `Success: no issues found in 26 source files`.
+It caught one real defect on the way: `cost_by_data_domain` accumulated floats
+into a `Counter[str]`, which is int-typed.
 
-**Recommendation:** either get it clean in Tollgate 2 or relax the config so it
-isn't aspirational. **Cost:** 🟢
+**Still open:** the config sets `packages = ["agent_control_plane"]`, so `tests/`
+and `scripts/` are unchecked. Test code is where a wrong type is most likely to
+mean a test that passes vacuously.
+
+**Recommendation:** extend the check to `tests` when you add CI (Q19), not
+before — it will surface a batch of fixture annotations and that is better
+handled in one pass. **Cost:** 🟢
 
 ---
 
 ## 5. Packaging
 
-### Q21. The package is named `agentops`
-There is an unrelated `agentops` package on PyPI. Fine for a private/internal
-project; a problem if this is ever published or if someone pip-installs both.
-
-**Recommendation:** rename to `acp` or `agentcp` **now** if publication is
-plausible. Renaming after external consumers exist is painful.
-**Cost:** 🟢 today, 🔴 later.
+### Q21. The package was named `agentops`
+→ **Resolved in Tollgate 2.** Renamed to `agent_control_plane`; see above.
 
 ### Q22. Repo/directory naming mismatch
-Directory: `agent control plane` (with spaces). Project name:
-`agent-control-plane-lite`. Remote: `agent-control-plane`. Nothing breaks, but
-the spaces make shell quoting fiddly on Windows.
-
-**Recommendation:** cosmetic; rename the directory to `agent-control-plane` if
-it starts to annoy. **Cost:** 🟢
+→ **Resolved in Tollgate 2** as far as it matters. The directory still has
+spaces in it, which is cosmetic; see above.
 
 ### Q23. Parent directory is itself a git repo
 `C:/Users/paulc/Documents` is a git repository containing ~20 untracked

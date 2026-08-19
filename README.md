@@ -37,10 +37,13 @@ Both shapes are reconstructable from stored events.
 
 ## Status
 
-**Tollgate 1.** Local/synthetic and MCP-log ingestion, SQLite persistence, a
-rule-based policy engine, analytics, a CLI, and tests. No dashboard yet, no
-cloud adapters yet. See `docs/ARCHITECTURE.md` for how the later adapters slot
-in without touching the core.
+**Tollgate 2, in progress.** Local/synthetic and MCP-log ingestion, SQLite
+persistence, a rule-based policy engine, analytics, a CLI, and tests. Since
+Tollgate 1: tenancy on every event and every read, a controlled vocabulary for
+data domains, and decision metadata on rules so a finding records what a gateway
+*would* have done. Still observe-only. No dashboard yet, no cloud adapters yet.
+See `docs/ARCHITECTURE.md` for how the later adapters slot in without touching
+the core.
 
 ## Architecture in one screen
 
@@ -59,7 +62,7 @@ in without touching the core.
         │                      │
         └──────────┬───────────┘
                    ▼
-              models/  (vendor-neutral: AgentEvent, Agent, Tool, PolicyResult)
+              models/  (vendor-neutral: AgentEvent, Agent, Tool, DataDomain, PolicyResult)
 ```
 
 Imports only ever point downward. `models/` imports nothing from the project;
@@ -89,7 +92,7 @@ No cloud credentials are needed for anything in this repo.
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
-.venv\Scripts\python.exe -m pytest --cov=agentops --cov-report=term-missing
+.venv\Scripts\python.exe -m pytest --cov=agent_control_plane --cov-report=term-missing
 ```
 
 ## Generate sample data
@@ -98,7 +101,7 @@ Seeds the deterministic *Weekly Sales Forecast Agent* scenario plus the sample
 MCP gateway log, then evaluates every policy over it:
 
 ```powershell
-.venv\Scripts\agentops.exe seed --reset
+.venv\Scripts\acp.exe seed --reset
 ```
 
 or, without the console script:
@@ -115,11 +118,11 @@ one run where the forecast agent oversteps in four distinct ways.
 ## Explore from the CLI
 
 ```powershell
-.venv\Scripts\agentops.exe stats                             # headline metrics
-.venv\Scripts\agentops.exe runs                              # recent execution history
-.venv\Scripts\agentops.exe violations                        # findings, worst first
-.venv\Scripts\agentops.exe trace run-2026-08-17-violation    # one execution chain
-.venv\Scripts\agentops.exe evaluate                          # re-run policies after a rule change
+.venv\Scripts\acp.exe stats                             # headline metrics
+.venv\Scripts\acp.exe runs                              # recent execution history
+.venv\Scripts\acp.exe violations                        # findings, worst first
+.venv\Scripts\acp.exe trace run-2026-08-17-violation    # one execution chain
+.venv\Scripts\acp.exe evaluate                          # re-run policies after a rule change
 ```
 
 `trace` prints the reconstructed call tree:
@@ -156,6 +159,8 @@ Governance lives in version-controlled YAML, not in the database:
 
 - `config/agents.yaml` — agent inventory and each agent's governance envelope
 - `config/tools.yaml` — tool inventory, including `is_mutating` and `requires_approval`
+- `config/data_domains.yaml` — the controlled data-domain vocabulary and the
+  rules that map vendor objects onto it
 
 Access scope is always **two explicit fields**, a mode and a list:
 
@@ -169,46 +174,98 @@ An empty list under `allowlist` means *no tools allowed*. It never means
 then rejected outright. Emptiness carries no security meaning anywhere in this
 system; see the rationale in `docs/ARCHITECTURE.md`.
 
-Runtime settings come from env vars prefixed `AGENTOPS_` (or a `.env` file):
-`AGENTOPS_DB_PATH`, `AGENTOPS_REGISTRY_DIR`, `AGENTOPS_LOG_LEVEL`,
-`AGENTOPS_LOG_JSON`, `AGENTOPS_DEFAULT_MAX_COST_USD`,
-`AGENTOPS_DEFAULT_MAX_TOOL_CALLS`.
+Runtime settings come from env vars prefixed `ACP_` (or a `.env` file):
+`ACP_TENANT_ID`, `ACP_DB_PATH`, `ACP_REGISTRY_DIR`, `ACP_LOG_LEVEL`,
+`ACP_LOG_JSON`, `ACP_DEFAULT_MAX_COST_USD`,
+`ACP_DEFAULT_MAX_TOOL_CALLS`.
+
+## Data domains
+
+A data domain is a governance term (`sales`, `hr`, `logistics`), not whatever
+string a vendor happened to log. `config/data_domains.yaml` declares the
+vocabulary and the mapping rules that get you there:
+
+```yaml
+domains:
+  - name: hr
+    sensitivity: restricted        # public | internal | confidential | restricted
+    owner: people-ops@contoso.com
+
+mappings:
+  - {platform: snowflake, pattern: "HR.*.*", domain: hr}
+  - {platform: mcp, pattern: "ERP://SHIPMENTS/*", domain: logistics}
+```
+
+The pipeline is always **vendor object → mapping rule → controlled domain**.
+Patterns are case-insensitive globs over each platform's natural identifier, and
+the **most specific match wins** — fewest wildcards, then longest — so adding a
+narrow rule never means reordering the file. A gateway's own `data_domain` field
+is treated as a *claim*: it survives only if it is in the vocabulary, and a
+mapping rule always beats it.
+
+When nothing matches, the answer is the reserved `unknown` domain and a policy
+finding — never the vendor's string. `unknown` is deliberately not declarable,
+so no agent can be granted access to it. An unclassified object is a governance
+gap of *ours*, which is why `unknown_data_domain` is medium and never blocks,
+and why `unauthorized_data_domain` stays quiet about it rather than charging the
+agent with a scope breach nobody could have satisfied.
+
+## Tenancy
+
+Every event, chain and policy result carries a `tenant_id`, and **every
+repository read takes one as a required argument** — not an optional filter with
+a default, because a forgettable tenant filter is one someone will forget.
+Chains reject mixed-tenant batches, and event fingerprints include the tenant,
+so the same event id in two tenants is two events.
+
+One `ControlPlane` serves one tenant. Serving several means building several,
+which makes cross-tenant access an explicit act. Registry entries are scoped the
+same way: an entry with no `tenant_id` belongs to the default tenant, so a second
+tenant starts with an empty vocabulary rather than inheriting yours.
 
 ## Policies
 
-| Policy | Severity | Fires when |
-|---|---|---|
-| `read_only_violation` | critical | A read-only agent attempts a write — detected from the declared action *or* the tool registry's `is_mutating` |
-| `unauthorized_data_domain` | high | An agent touches a data domain its `data_access` scope does not permit |
-| `tool_not_allowlisted` | high | An agent calls a tool its `tool_access` scope does not permit |
-| `missing_human_approval` | high | An approval-gated action ran with no *linked* approval event |
-| `cost_threshold_exceeded` | medium | Per-agent spend in one run exceeds its ceiling |
-| `excessive_tool_calls` | medium | Per-agent tool calls in one run exceed its ceiling |
-| `unregistered_agent` | medium | Activity from an agent that is not in the registry |
+| Policy | Severity | Decision | Fires when |
+|---|---|---|---|
+| `read_only_violation` | critical | deny | A read-only agent attempts a write — detected from the declared action *or* the tool registry's `is_mutating` |
+| `unauthorized_data_domain` | high | deny | An agent touches a *classified* data domain its `data_access` scope does not permit |
+| `tool_not_allowlisted` | high | deny | An agent calls a tool its `tool_access` scope does not permit |
+| `missing_human_approval` | high | require approval | An approval-gated action ran with no *linked* approval event |
+| `cost_threshold_exceeded` | medium | deny | Per-agent spend in one run exceeds its ceiling |
+| `excessive_tool_calls` | medium | deny | Per-agent tool calls in one run exceed its ceiling |
+| `unregistered_agent` | medium | allow | Activity from an agent that is not in the registry |
+| `unknown_data_domain` | medium | allow | Data was touched under a domain no mapping rule classifies, or one outside the vocabulary |
 
-Two behaviours worth knowing:
+Three behaviours worth knowing:
 
 - **A blocked attempt is still a violation.** If the gateway denies a write, the
   attempt is recorded as a finding. The gateway working is not the same as the
   agent behaving.
 - **Every rule emits a result on every run** — its findings, or one PASS row
   proving it ran. "No violations" stays distinguishable from "nobody checked".
+- **The decision column is intent, not action.** This system observes; it does
+  not enforce. A violation whose rule decides `deny` or `require_approval` sets
+  `would_block`, which answers "what would a gateway have done here?" without
+  anyone having claimed it did. `PolicyResult.enforced` exists for the day
+  enforcement lands and is rejected outright if set today — an audit trail that
+  says something was blocked when nothing was is worse than no audit trail.
 
-Adding a rule means writing a class with `name`, `severity`, `description` and
-`evaluate(chain, ctx)`, then adding it to `default_rules()`. No registration
-machinery.
+Adding a rule means writing a class with `name`, `severity`, `description`,
+`decision` and `evaluate(chain, ctx)`, then adding it to `default_rules()`. No
+registration machinery.
 
 ## Layout
 
 ```
-src/agentops/
-  models/        vendor-neutral domain model
+src/agent_control_plane/
+  models/        vendor-neutral domain model (incl. data_domain.py)
   adapters/      one module per source; Protocol in base.py
   repositories/  persistence Protocol + SQLite implementation
   services/      ingestion, policy engine, rules, analytics
   bootstrap.py   composition root — the only place concrete types are wired
+  constants.py   shared literals (default tenant, the `unknown` domain)
   cli.py
-config/          agent + tool registries (governance intent)
+config/          agent, tool + data-domain registries (governance intent)
 data/samples/    committed fixture input (sample MCP gateway log)
 docs/            ARCHITECTURE.md, QUESTIONS_FOR_PAUL.md
 tests/
