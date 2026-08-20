@@ -11,7 +11,7 @@ not touching the core.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -47,18 +47,24 @@ class NormalizationError(AdapterError):
         self.record = record
 
 
-def normalize_all(
+def normalize_all[T](
     source_name: str,
     records: Iterable[Any],
-    mapper: Any,
+    mapper: Callable[[Any], T],
     *,
     strict: bool = False,
-) -> Iterator[AgentEvent]:
-    """Map raw records to events, isolating per-record failures.
+) -> Iterator[T]:
+    """Map raw records, isolating per-record failures.
 
     A malformed row in an audit export shouldn't sink the whole ingest run, so
     the default is skip-and-log. `strict=True` is for tests and for sources
     where silent loss is unacceptable.
+
+    Generic in what the mapper returns because the record-to-event relation is
+    not always one-to-one: an audit row that touches several objects is several
+    governed facts, so such a mapper returns a list and the caller flattens.
+    Isolation is per *record* either way — a row that fails maps to nothing,
+    never to a half-emitted batch.
     """
     for index, record in enumerate(records):
         try:

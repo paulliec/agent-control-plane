@@ -8,14 +8,20 @@ from pathlib import Path
 import pytest
 
 from agent_control_plane.adapters.mcp import MCPCallLogSource
+from agent_control_plane.adapters.snowflake import SnowflakeActivitySource
 from agent_control_plane.adapters.synthetic import SyntheticSource, generate_events
 from agent_control_plane.bootstrap import ControlPlane, build_control_plane
 from agent_control_plane.config import REPO_ROOT, Settings
 from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
 from agent_control_plane.models.enums import AccessScopeMode, EventType, Severity
+from agent_control_plane.models.policy import PolicyResult
 from agent_control_plane.registry import Registry, RegistryError, load_registry
 
 SAMPLE_LOG = REPO_ROOT / "data" / "samples" / "mcp_tool_calls.jsonl"
+SNOWFLAKE_EXTRACT = REPO_ROOT / "data" / "samples" / "snowflake_activity.jsonl"
+SNOWFLAKE_RUN = "sf-forecast-2026-08-18"
+# Matches scripts/seed_demo.py. Credits are telemetry; the rate is not.
+DEMO_CREDIT_RATE = 3.00
 
 
 @pytest.fixture
@@ -30,6 +36,12 @@ def seeded(control_plane: ControlPlane) -> ControlPlane:
                 SAMPLE_LOG,
                 tenant_id=control_plane.tenant_id,
                 domains=control_plane.registry.data_domains,
+            ),
+            SnowflakeActivitySource(
+                SNOWFLAKE_EXTRACT,
+                tenant_id=control_plane.tenant_id,
+                domains=control_plane.registry.data_domains,
+                credit_rate_usd=DEMO_CREDIT_RATE,
             ),
         ]
     )
@@ -117,9 +129,11 @@ def test_ingestion_stamps_provenance(control_plane: ControlPlane) -> None:
     assert all(e.source_adapter == "synthetic" for e in events)
 
 
-def test_two_sources_coexist(seeded: ControlPlane) -> None:
+def test_three_sources_coexist(seeded: ControlPlane) -> None:
+    """The point of the whole exercise: three vendors, one event store, one set
+    of rules. Not three parallel control planes."""
     adapters = {e.source_adapter for e in seeded.repository.list_events(seeded.tenant_id)}
-    assert adapters == {"synthetic", "mcp"}
+    assert adapters == {"synthetic", "mcp", "snowflake"}
 
 
 # -- tenancy --------------------------------------------------------------
@@ -257,6 +271,149 @@ def test_every_rule_reports_on_every_run(seeded: ControlPlane) -> None:
             )
         }
         assert reported == expected, correlation_id
+
+
+# -- snowflake ------------------------------------------------------------
+#
+# The full path for the third source: extract -> adapter -> repository ->
+# execution chain -> policy engine -> analytics. Nothing below the adapter is
+# Snowflake-aware, and these tests exist to keep it that way.
+
+
+def _sf_results(cp: ControlPlane, *, violations_only: bool = False) -> list[PolicyResult]:
+    return cp.repository.list_policy_results(
+        cp.tenant_id, correlation_id=SNOWFLAKE_RUN, violations_only=violations_only
+    )
+
+
+def test_snowflake_events_persist_and_are_queryable(seeded: ControlPlane) -> None:
+    events = seeded.repository.list_events(seeded.tenant_id, correlation_id=SNOWFLAKE_RUN)
+    assert len(events) == 9
+    assert {e.source_adapter for e in events} == {"snowflake"}
+    assert {e.tenant_id for e in events} == {seeded.tenant_id}
+    # Traceable back to the source row without Snowflake leaking into the model.
+    assert all(e.metadata["query_id"] for e in events)
+
+
+def test_snowflake_run_is_evaluated_by_the_same_rules_as_everything_else(
+    seeded: ControlPlane,
+) -> None:
+    """Not a Snowflake rule set. The rule set."""
+    reported = {r.policy_name for r in _sf_results(seeded)}
+    assert reported == {rule.name for rule in seeded.engine.rules}
+
+
+def test_snowflake_governance_findings(seeded: ControlPlane) -> None:
+    assert _violation_names(seeded, SNOWFLAKE_RUN) == {
+        "read_only_violation",
+        "unauthorized_data_domain",
+        "unknown_data_domain",
+    }
+
+
+def test_a_read_only_agent_writing_in_snowflake_is_critical(seeded: ControlPlane) -> None:
+    """Snowflake permitted the UPDATE; the agent's governance envelope did not.
+    RBAC allowing something is not the same as it being allowed."""
+    finding = next(
+        r
+        for r in _sf_results(seeded, violations_only=True)
+        if r.policy_name == "read_only_violation"
+        and r.evidence["resources"] == ["INVENTORY.PUBLIC.DIM_SKU"]
+    )
+    assert finding.severity is Severity.CRITICAL
+    assert finding.would_block is True
+
+
+def test_the_unclassified_snowflake_table_is_our_gap_not_the_agents(
+    seeded: ControlPlane,
+) -> None:
+    """RAW_LANDING has no mapping rule. That must read as a configuration gap,
+    and must not also be charged to the agent as a scope breach."""
+    unknown = next(
+        r
+        for r in _sf_results(seeded, violations_only=True)
+        if r.policy_name == "unknown_data_domain"
+    )
+    assert unknown.evidence["resources"] == ["RAW_LANDING.PUBLIC.VENDOR_FEED"]
+    assert unknown.would_block is False
+
+    scope_breaches = [
+        r
+        for r in _sf_results(seeded, violations_only=True)
+        if r.policy_name == "unauthorized_data_domain"
+    ]
+    assert [r.evidence["data_domain"] for r in scope_breaches] == ["hr"]
+
+
+def test_a_snowflake_chain_reconstructs_without_a_run_envelope(
+    seeded: ControlPlane,
+) -> None:
+    """ACCOUNT_USAGE has no 'agent run started' record, so every query is a root
+    and the chain is flat. That is honest rather than a defect - but it is a
+    shape the other two sources never produce, so it gets a regression test."""
+    chain = seeded.analytics.chain(SNOWFLAKE_RUN)
+    assert chain is not None
+    assert len(chain.roots) == len(chain.events)
+    assert not any(e.event_type is EventType.AGENT_RUN_START for e in chain.events)
+
+    walked = chain.walk()
+    assert len(walked) == len(chain.events), "every event must still be reachable"
+    assert {depth for depth, _ in walked} == {0}
+
+
+def test_snowflake_participates_in_analytics(seeded: ControlPlane) -> None:
+    summary = seeded.analytics.run_summary(SNOWFLAKE_RUN)
+    assert summary is not None
+    assert summary.agent_ids == ("agt_forecast_weekly",)
+    assert summary.initiated_by == "SVC_FORECAST_AGENT"
+    # A refused delete and a failed query, with no terminal event to say
+    # otherwise, is a failed run.
+    assert summary.ok is False
+    assert summary.max_severity is Severity.CRITICAL
+
+    assert seeded.analytics.events_by_platform()["snowflake"] > 0
+    assert any(r.correlation_id == SNOWFLAKE_RUN for r in seeded.analytics.recent_runs())
+
+
+def test_snowflake_cost_reaches_the_aggregates(seeded: ControlPlane) -> None:
+    """Only because the demo supplied a credit rate - see the fixture."""
+    summary = seeded.analytics.run_summary(SNOWFLAKE_RUN)
+    assert summary is not None and summary.cost_usd > 0
+
+    forecaster = next(
+        c for c in seeded.analytics.cost_by_agent() if c.agent_id == "agt_forecast_weekly"
+    )
+    assert forecaster.run_count > 1, "the same agent is seen on two platforms"
+
+
+def test_snowflake_domains_reach_the_domain_aggregate(seeded: ControlPlane) -> None:
+    spend = seeded.analytics.cost_by_data_domain()
+    assert UNKNOWN_DATA_DOMAIN in spend
+    assert spend["hr"] > 0
+
+
+def test_snowflake_events_respect_the_tenant_boundary(
+    seeded: ControlPlane, settings: Settings
+) -> None:
+    with build_control_plane(settings, tenant_id="acme") as acme:
+        assert acme.repository.list_events("acme", correlation_id=SNOWFLAKE_RUN) == []
+    assert seeded.repository.list_events(seeded.tenant_id, correlation_id=SNOWFLAKE_RUN)
+
+
+def test_reingesting_the_extract_is_idempotent(seeded: ControlPlane) -> None:
+    """Query ids are stable, so a re-pull of an overlapping window writes nothing."""
+    before = seeded.repository.count_events(seeded.tenant_id)
+    result = seeded.ingestion.ingest(
+        SnowflakeActivitySource(
+            SNOWFLAKE_EXTRACT,
+            tenant_id=seeded.tenant_id,
+            domains=seeded.registry.data_domains,
+            credit_rate_usd=DEMO_CREDIT_RATE,
+        )
+    )
+    assert result.written == 0
+    assert result.duplicates == result.fetched == 9
+    assert seeded.repository.count_events(seeded.tenant_id) == before
 
 
 # -- analytics ------------------------------------------------------------

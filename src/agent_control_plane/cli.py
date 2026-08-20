@@ -18,6 +18,7 @@ from pathlib import Path
 
 from agent_control_plane.adapters.base import EventSource
 from agent_control_plane.adapters.mcp import MCPCallLogSource
+from agent_control_plane.adapters.snowflake import SnowflakeActivitySource
 from agent_control_plane.adapters.synthetic import SyntheticSource
 from agent_control_plane.bootstrap import ControlPlane, build_control_plane
 from agent_control_plane.config import load_settings
@@ -36,8 +37,8 @@ _TREE_MARK = {
 }
 
 
-def _default_mcp_log(cp: ControlPlane) -> Path:
-    return cp.settings.data_dir / "samples" / "mcp_tool_calls.jsonl"
+def _sample(cp: ControlPlane, filename: str) -> Path:
+    return cp.settings.data_dir / "samples" / filename
 
 
 # -- commands -------------------------------------------------------------
@@ -45,13 +46,40 @@ def _default_mcp_log(cp: ControlPlane) -> Path:
 
 def cmd_seed(cp: ControlPlane, args: argparse.Namespace) -> int:
     sources: list[EventSource] = [SyntheticSource(seed=args.seed, tenant_id=cp.tenant_id)]
-    mcp_log = Path(args.mcp_log) if args.mcp_log else _default_mcp_log(cp)
+
+    # File-backed sources are optional: a missing sample degrades to a warning
+    # so the demo still runs, rather than failing on an absent fixture.
+    mcp_log = Path(args.mcp_log) if args.mcp_log else _sample(cp, "mcp_tool_calls.jsonl")
     if mcp_log.exists():
         sources.append(
             MCPCallLogSource(mcp_log, tenant_id=cp.tenant_id, domains=cp.registry.data_domains)
         )
     else:
         print(f"! no MCP log at {mcp_log}, skipping that source")
+
+    sf_extract = (
+        Path(args.snowflake_extract)
+        if args.snowflake_extract
+        else _sample(cp, "snowflake_activity.jsonl")
+    )
+    if sf_extract.exists():
+        sources.append(
+            SnowflakeActivitySource(
+                sf_extract,
+                tenant_id=cp.tenant_id,
+                domains=cp.registry.data_domains,
+                credit_rate_usd=args.snowflake_credit_rate,
+            )
+        )
+        if args.snowflake_credit_rate is not None:
+            # Snowflake reports credits, not dollars. Say out loud that the USD
+            # figures downstream rest on a rate we were handed, not measured.
+            print(
+                f"  snowflake credits priced at ${args.snowflake_credit_rate:.2f}/credit "
+                "(assumption, not telemetry)"
+            )
+    else:
+        print(f"! no Snowflake extract at {sf_extract}, skipping that source")
 
     for result in cp.ingestion.ingest_all(sources):
         print(
@@ -167,6 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
     seed = sub.add_parser("seed", help="generate and ingest sample data")
     seed.add_argument("--seed", type=int, default=20260810)
     seed.add_argument("--mcp-log", default=None)
+    seed.add_argument("--snowflake-extract", default=None)
+    seed.add_argument(
+        "--snowflake-credit-rate",
+        type=float,
+        default=None,
+        help="USD per Snowflake credit. Omitted means costs stay unpriced, "
+        "because the rate is contractual and is not in the telemetry.",
+    )
     seed.add_argument("--reset", action="store_true", help="delete the database first")
     seed.set_defaults(func=cmd_seed)
 

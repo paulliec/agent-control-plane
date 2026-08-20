@@ -28,12 +28,34 @@ def seeded_db(db: str) -> str:
     return db
 
 
-def test_seed_reports_both_sources(db: str, capsys: pytest.CaptureFixture[str]) -> None:
+def test_seed_reports_every_source(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert _run(db, "seed", "--mcp-log", str(SAMPLE_LOG)) == 0
     out = capsys.readouterr().out
-    assert "synthetic" in out and "mcp" in out
+    assert "synthetic" in out and "mcp" in out and "snowflake" in out
     assert "written=143" in out
     assert Path(db).exists()
+
+
+def test_a_missing_optional_sample_degrades_to_a_warning(
+    db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """File-backed sources are optional; synthetic alone must still seed."""
+    assert _run(db, "seed", "--snowflake-extract", "does/not/exist.jsonl") == 0
+    out = capsys.readouterr().out
+    assert "no Snowflake extract" in out
+    assert "synthetic" in out
+
+
+def test_snowflake_costs_are_unpriced_unless_a_rate_is_given(
+    db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Credits are telemetry; the USD rate is contractual. Absent a rate the CLI
+    must not quietly invent one, and must say so when it is handed one."""
+    assert _run(db, "seed", "--mcp-log", str(SAMPLE_LOG)) == 0
+    assert "assumption, not telemetry" not in capsys.readouterr().out
+
+    assert _run(db, "seed", "--snowflake-credit-rate", "3.00") == 0
+    assert "assumption, not telemetry" in capsys.readouterr().out
 
 
 def test_seed_without_an_mcp_log_still_works(
@@ -82,9 +104,14 @@ def test_runs_lists_every_run_newest_first(
 ) -> None:
     assert _run(seeded_db, "runs") == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert len(lines) == 10
-    assert "run-2026-08-17-violation" in lines[0]
-    assert "critical" in lines[0]
+    # 9 synthetic + 1 MCP + 1 Snowflake.
+    assert len(lines) == 11
+
+    dates = [line.split()[0] for line in lines]
+    assert dates == sorted(dates, reverse=True)
+
+    worst = next(line for line in lines if "run-2026-08-17-violation" in line)
+    assert "critical" in worst
 
 
 def test_runs_respects_limit(seeded_db: str, capsys: pytest.CaptureFixture[str]) -> None:
