@@ -276,13 +276,16 @@ Python code block in the `PolicyRule` snippet.
 to `main`, running format, lint, `mypy --strict`, `pytest --cov`, the seed
 demo, and the five CLI commands.
 
-**One decision worth your attention:** no matrix, and pinned to **3.12**. Every
-tool config in the repo already says 3.12 (`requires-python`, ruff
-`target-version`, mypy `python_version`), so that is what the project claims to
-support. But it is developed on 3.13, which CI therefore never exercises. If
-3.13 is the real deployment target, either say so in `requires-python` or add
-the second interpreter — right now the declared floor and the actual dev
-environment disagree, and CI follows the declaration. 🟢
+**Version policy — you decided this:** 3.12 is the minimum supported version and
+the CI target; 3.13 is the development interpreter. No matrix. Every tool config
+already said 3.12 (`requires-python`, ruff `target-version`, mypy
+`python_version`) so nothing changed but the README wording, which previously
+left the two readings ambiguous.
+
+The residual risk is stated rather than fixed: CI never exercises 3.13, so a
+3.13-only regression would surface locally before it surfaced in CI. Acceptable
+while 3.12 is the promise — add the second interpreter to the matrix if that
+ever stops being true. 🟢
 
 **Coverage:** configured in `pyproject.toml`, not in the CI command, so the gate
 is identical locally and in CI. `fail_under = 96` sits just under the current

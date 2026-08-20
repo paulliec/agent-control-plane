@@ -73,10 +73,13 @@ Open decisions: [`docs/QUESTIONS_FOR_PAUL.md`](docs/QUESTIONS_FOR_PAUL.md).
 
 ## Install
 
-Requires Python 3.12+ (developed on 3.13).
+**Minimum supported: Python 3.12.** That is the floor every tool config and CI
+target, and it is what the project promises to run on. Development happens on
+3.13, which is supported but not the baseline — if the two ever disagree, 3.12
+is the one that must keep working.
 
 ```powershell
-py -3.13 -m venv .venv
+py -3.13 -m venv .venv          # or py -3.12; both work
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
