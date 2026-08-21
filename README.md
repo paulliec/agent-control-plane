@@ -37,13 +37,15 @@ Both shapes are reconstructable from stored events.
 
 ## Status
 
-**Tollgate 2, in progress.** Local/synthetic and MCP-log ingestion, SQLite
-persistence, a rule-based policy engine, analytics, a CLI, and tests. Since
-Tollgate 1: tenancy on every event and every read, a controlled vocabulary for
-data domains, and decision metadata on rules so a finding records what a gateway
-*would* have done. Still observe-only. No dashboard yet, no cloud adapters yet.
-See `docs/ARCHITECTURE.md` for how the later adapters slot in without touching
-the core.
+**Tollgate 2B, in progress.** Three ingestion sources — synthetic, MCP call
+logs and Snowflake `ACCOUNT_USAGE` extracts — over SQLite persistence, a
+rule-based policy engine, analytics, a CLI, and tests. Tollgate 2A added tenancy
+on every event and every read, a controlled vocabulary for data domains, and
+decision metadata so a finding records what a gateway *would* have done.
+
+The Snowflake adapter is **fixture-backed**: it reads a committed extract, needs
+no credentials and does not import the Snowflake connector. Still observe-only,
+no dashboard yet.
 
 ## Architecture in one screen
 
@@ -58,7 +60,7 @@ the core.
         ▼                      ▼
   repositories/           adapters/
   (Protocol)              (Protocol)
-  sqlite.py               synthetic.py · mcp.py
+  sqlite.py         synthetic.py · mcp.py · snowflake.py
         │                      │
         └──────────┬───────────┘
                    ▼
@@ -134,6 +136,18 @@ The scenario covers nine weekly runs: routine forecasts, a governed publish
 server times out and the agent retries, a shadow agent nobody registered, and
 one run where the forecast agent oversteps in four distinct ways.
 
+Alongside it, two committed extracts — an MCP gateway call log and a Snowflake
+`ACCOUNT_USAGE` join — land as separate runs from the same agents. A fresh demo
+database therefore holds events from all three sources, governed by one rule
+set:
+
+```powershell
+.venv\Scripts\acp.exe stats     # events by platform: local, mcp, snowflake, other
+```
+
+Both file-backed sources are optional. If a sample is missing, seed says so and
+carries on.
+
 ## Explore from the CLI
 
 ```powershell
@@ -179,7 +193,8 @@ Governance lives in version-controlled YAML, not in the database:
 - `config/agents.yaml` — agent inventory and each agent's governance envelope
 - `config/tools.yaml` — tool inventory, including `is_mutating` and `requires_approval`
 - `config/data_domains.yaml` — the controlled data-domain vocabulary and the
-  rules that map vendor objects onto it
+  rules that map vendor objects onto it (including the `snowflake`
+  `DB.SCHEMA.OBJECT` patterns the Snowflake adapter classifies through)
 
 Access scope is always **two explicit fields**, a mode and a list:
 

@@ -1,9 +1,10 @@
 # Architecture
 
-Status: Tollgate 2, in progress. Local/synthetic + MCP-log ingestion, SQLite
-persistence, rule-based policy engine, analytics, CLI. Tenancy, a controlled
-data-domain vocabulary and decision metadata landed since Tollgate 1; the system
-is still observe-only. No dashboard, no cloud adapters yet.
+Status: Tollgate 2B, in progress. Synthetic + MCP-log + Snowflake-extract
+ingestion, SQLite persistence, rule-based policy engine, analytics, CLI. Tenancy,
+a controlled data-domain vocabulary and decision metadata landed in 2A; the
+system is still observe-only. The Snowflake adapter is fixture-backed — no
+credentials, no connector. No dashboard yet.
 
 ## Principle
 
@@ -23,8 +24,8 @@ pushed to the edges, behind a Protocol.
    repositories/base.py          adapters/base.py
       (Protocol)                    (Protocol)
           │                            │
-    sqlite.py                  synthetic.py · mcp.py
-          │                     (future: snowflake · databricks · foundry)
+    sqlite.py          synthetic.py · mcp.py · snowflake.py
+          │                     (future: databricks · foundry)
           └─────────────┬──────────────┘
                         ▼
                     models/
@@ -254,6 +255,12 @@ malformed row in an audit export is logged and skipped, not fatal.
 `strict=True` flips that for tests and for sources where silent loss is
 unacceptable.
 
+It is generic in what the mapper returns, because record-to-event is not always
+one-to-one. An audit row that touches several governed objects is several facts,
+so such a mapper returns a list and the adapter flattens. Isolation stays per
+*source record* either way: a row that fails maps to nothing, never to a
+half-emitted batch.
+
 Shipped adapters:
 
 - **`synthetic.py`** — the Weekly Sales Forecast scenario. Deterministic for a
@@ -262,6 +269,11 @@ Shipped adapters:
   deliberately does **not** import an MCP SDK: the control plane consumes logs,
   not live protocol traffic, which keeps it testable offline and usable against
   any gateway that can write JSONL.
+- **`snowflake.py`** — reads a JSONL extract of joined `ACCOUNT_USAGE` rows, on
+  the same offline-first principle. See *Snowflake* under future platform
+  integrations for the mapping and, more importantly, for what it refuses to
+  map. It is the one adapter where a single source row can become several
+  events.
 
 One mapping decision worth calling out: an MCP `tools/call` with no declared
 `op` maps to `action=invoke`, **not** `read`. Defaulting to `read` would
@@ -427,26 +439,75 @@ Each is a new module in `adapters/` implementing `EventSource`. No change to
 `models/`, `services/` or `repositories/` is anticipated. Sketch of the mapping
 work:
 
-### Snowflake
+### Snowflake — shipped, fixture-backed
 
-Source: `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, `ACCESS_HISTORY`, and the
-Cortex Agent / Snowflake Intelligence request logs.
+Source: a join on `QUERY_ID` across
+`SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` (who / what / status / credits),
+`ACCESS_HISTORY` (objects touched),
+`CORTEX_FUNCTIONS_QUERY_USAGE_HISTORY` (model, tokens) and
+`USERS` (`USER_TYPE`). `data/samples/snowflake_activity.jsonl` is that join,
+committed. The adapter consumes an *extract*, not a live connection — no
+credentials, no `snowflake-connector-python`. Going live replaces
+`SnowflakeActivitySource._read_records` with a cursor over the same join;
+nothing above the adapter changes.
 
 | Snowflake | `AgentEvent` |
 |---|---|
-| `QUERY_ID` | `event_id` |
-| `USER_NAME` / role | `actor_id`, `actor_type` |
-| agent or app identity | `agent_id` |
-| `ACCESS_HISTORY.objects_accessed` | `resource`, `data_domain` (via a mapping table) |
-| `CREDITS_USED_CLOUD_SERVICES` × rate | `estimated_cost_usd` |
-| `EXECUTION_STATUS` | `status` |
-| `QUERY_TAG` / session | `correlation_id` |
+| `QUERY_ID` | `event_id`, and `metadata.query_id` on every fanned-out event |
+| `QUERY_TAG.acp.run` | `correlation_id` |
+| `QUERY_TAG.acp.agent` | `agent_id` |
+| `QUERY_TAG.acp.tool` | `tool_name`, and `event_type = tool_call` when present |
+| `USER_NAME` | `actor_id` |
+| `USER_TYPE` | `actor_type` (`PERSON`→human, `SERVICE`→service) |
+| `QUERY_TYPE` | `action` (`SELECT`→read, `UPDATE`→write, `DELETE`→delete, `CALL`→invoke) |
+| `ACCESS_HISTORY` objects | `resource`, and `data_domain` via `classify(Platform.SNOWFLAKE, …)` |
+| `EXECUTION_STATUS` + `ERROR_CODE` | `status` — RBAC refusal becomes `denied`, not `failure` |
+| `TOTAL_ELAPSED_TIME` | `duration_ms` |
+| `CORTEX_FUNCTIONS.MODEL_NAME` | `model`, with `event_type = llm_call` |
+| everything unmapped | `metadata`, verbatim |
 
-The `db.schema.object` → domain mapping already exists: add `platform:
-snowflake` patterns to `config/data_domains.yaml` and call
-`registry.classify(Platform.SNOWFLAKE, resource)` from the adapter. Remaining
-open work is correlation, which depends on the agent stamping `QUERY_TAG` —
-configuration, not a model change.
+**Two provenances, deliberately kept apart.** Snowflake knows what SQL ran,
+against which objects, how long it took and what it cost. It has no concept of
+an agent: `QUERY_HISTORY` has `USER_NAME` and `ROLE_NAME`, and a service
+account is not an agent identity. Agent attribution comes *only* from
+`QUERY_TAG`, which the agent stamps itself — the same epistemic status as an
+MCP client naming its own tool. Events carry `metadata.attributed_by =
+"query_tag"` so that distinction survives into the audit trail. A query with no
+parseable tag is a human running ad-hoc SQL, and is dropped rather than
+attributed to an agent invented from a username.
+
+**One query, many objects.** A `SELECT` joining `SALES` to `HR` is an HR access
+whatever else it did, so one row fans out to one event per accessed object,
+sharing the run's `correlation_id` and carrying `metadata.query_id`. Collapsing
+to one event would mean choosing a domain and silently discarding the others —
+losing exactly the finding you built a control plane to catch.
+
+**What is deliberately left null.** Three things the source cannot honestly
+support, recorded as gaps rather than filled with plausible numbers:
+
+* **Cost.** `ACCOUNT_USAGE` reports *credits*. The USD rate is contractual and
+  appears nowhere in the telemetry, so `estimated_cost_usd` stays `None` unless
+  a caller passes `credit_rate_usd`, and the raw credits go to `metadata`. The
+  demo opts into a labelled rate so cost attribution stays demonstrable, and
+  `acp seed` prints it as an assumption. This is Q9 in practice.
+* **Token split.** The modelled Cortex row carries a single `TOKENS` total.
+  Apportioning it across `input_tokens` / `output_tokens` would be arithmetic
+  fiction, so both stay `None` and the total lives in
+  `metadata.cortex_tokens_total`.
+* **Actor type.** Only populated when the extract joins `USERS`. Inferring
+  human-versus-service from a username pattern would be a guess.
+
+**No run envelope.** Snowflake emits query rows, not "agent run started". A
+Snowflake chain is therefore flat — every event is a root, and there is no
+`agent_run_start`/`end`. `ExecutionChain` already handles multi-root chains, so
+nothing needed changing, but it is a shape the other two sources never produce
+and it has its own regression test. An agent that also reports its own run
+envelope through another source would join on `correlation_id`.
+
+**Unmappable rows are dropped, not guessed** — the `prompts/list` convention
+from MCP. A `QUERY_TYPE` with no governance verb (`USE`) is dropped rather than
+mapped to a default, because guessing the verb means guessing whether an agent
+wrote to production.
 
 ### Databricks
 
@@ -514,4 +575,5 @@ No cloud credentials, no network, deterministic throughout.
 | Policy rules | Each rule fires *and* passes; grouping; deny-all; a broken rule doesn't void the evaluation |
 | Chain reconstruction | Both required shapes, plus orphans and cycles |
 | Adapters | Determinism, chain integrity, the scenario's intended story, malformed-record isolation |
+| Adapter honesty | Every field the source cannot support stays null or drops the record: no invented cost, token split, actor type or agent identity |
 | End-to-end | Ingest → persist → evaluate → analytics against the **committed** `config/`, so a typo in governance config fails the build |

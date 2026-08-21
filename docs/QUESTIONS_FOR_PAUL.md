@@ -189,9 +189,23 @@ data exists is 🔴. Staying closed now keeps the cheap option open.
 `estimated_cost_usd` is a float. No record of which price list produced it, and
 no way to re-cost historical events when rates change.
 
-**Recommendation:** fine for MVP. If cost becomes a chargeback input rather than
-a dashboard number, add `pricing_version` and keep raw units (credits, tokens)
-alongside. **Cost:** 🟡
+**Update (Tollgate 2B) — this stopped being hypothetical.** Snowflake reports
+*credits*, not dollars, and the USD rate is contractual and absent from the
+telemetry. The adapter therefore leaves `estimated_cost_usd` as `None` unless a
+caller passes `credit_rate_usd`, keeps the raw credits in `metadata`, and the
+CLI prints the rate as an assumption when one is supplied. The demo opts in at
+$3.00/credit purely so cost attribution stays demonstrable.
+
+That is the right default, but it means **`total_cost_usd` now mixes units of
+confidence**: synthetic and MCP costs are per-event figures from the source,
+while Snowflake's are credits multiplied by a number someone typed. Nothing in
+the model distinguishes them.
+
+**Recommendation, now firmer:** if cost ever becomes a chargeback input rather
+than a dashboard number, add `pricing_version` (or at minimum a
+`cost_is_derived` flag) *before* anyone reconciles these figures against a
+bill. Keeping raw units alongside is already happening for Snowflake — the
+missing half is recording which rate produced the dollars. **Cost:** 🟡
 
 ### Q10. `data_domain` is a free string
 → **Resolved in Tollgate 2.** See the resolved section above.
@@ -312,6 +326,41 @@ enum is declared, and one `type: ignore` mypy now reports as unused.
 
 **Earlier note, now settled:** the concern was that this would need a batch of
 fixture churn. It did not — six errors, all fixed at the site. 🟢
+
+### Q24. Connecting the Snowflake adapter to a real account
+The adapter is fixture-backed by design: it reads a committed JSONL extract of
+a `QUERY_ID` join across `QUERY_HISTORY`, `ACCESS_HISTORY`,
+`CORTEX_FUNCTIONS_QUERY_USAGE_HISTORY` and `USERS`. Going live means replacing
+`SnowflakeActivitySource._read_records` with a cursor over that same join.
+Nothing above the adapter changes. What *does* need deciding first:
+
+**1. `QUERY_TAG` is load-bearing, and it is not ours.** Agent attribution comes
+only from a JSON tag the agent stamps itself. No tag, no event — a query we
+cannot attribute is dropped rather than pinned on an invented agent. That is
+the honest behaviour, but it means **an agent that forgets to stamp its tag
+becomes invisible to governance**, which is the wrong direction for a failure
+to point. Before going live, either enforce the tag (a Snowflake session policy
+or a wrapper the agents must use), or accept the gap knowingly and monitor the
+drop count. Today it is only logged. 🔴 — this is the one that decides whether
+real Snowflake coverage is trustworthy.
+
+**2. `ACCOUNT_USAGE` latency.** These views lag, historically up to ~45 minutes
+for `QUERY_HISTORY` and longer for `ACCESS_HISTORY`. Any "current state" claim
+built on them is wrong by construction. `fetch(since=…)` exists, but nothing
+yet records a high-water mark, so incremental polling is the caller's problem.
+
+**3. Credentials and least privilege.** Reading `ACCOUNT_USAGE` needs a role
+with `IMPORTED PRIVILEGES` on the `SNOWFLAKE` database. That is a broad grant —
+it can see every query on the account. Worth a dedicated read-only service user
+whose access is itself audited, not a reused analytics role.
+
+**4. Cost rate.** See Q9. Someone has to supply the contract rate, and it should
+live in configuration next to the registries rather than in a CLI flag.
+
+**5. One account, one tenant?** The adapter takes `tenant_id` from the caller,
+which assumes an account maps to a tenant. If one Snowflake account serves
+several ACP tenants, the mapping has to come from somewhere in the data — most
+plausibly the `QUERY_TAG` — and that needs deciding before data lands. 🟡
 
 ---
 
