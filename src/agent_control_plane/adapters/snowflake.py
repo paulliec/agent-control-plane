@@ -13,12 +13,29 @@ at a real account means replacing :meth:`SnowflakeActivitySource._read_records`
 with a cursor over that join. Nothing above this module changes.
 
 **Two provenances, kept apart.** Snowflake knows what SQL ran, against which
-objects, how long it took and what it cost. It does not know what an *agent* is:
-``QUERY_HISTORY`` has ``USER_NAME`` and ``ROLE_NAME``, and a service user is not
-an agent identity. Agent attribution therefore comes from ``QUERY_TAG``, which
-the agent stamps itself — the same epistemic status as an MCP client naming its
-own tool, and recorded as such. A row with no parseable tag has no agent, and
-we drop it rather than guess one from a username.
+objects, how long it took and what it cost. It also now knows, natively,
+*whether an agent invoked the query* — ``QUERY_HISTORY.AGENT_TYPE`` and
+``ACCESS_HISTORY.AGENTS_INFO``. What it does not always know is *which logical
+agent*: ``CORTEX_AGENT`` can carry a real name, ``CORTEX_LITE_AGENT`` need not
+represent a stable named agent, and ``EXTERNAL_AGENT`` may arrive with null id
+and name. ``USER_NAME`` stays actor/session identity throughout; a service user
+is not an agent.
+
+So three questions are answered separately, and the answers are recorded with
+where they came from (``metadata["attribution"]``):
+
+* **Is this agentic, and what type?** Snowflake, natively. Never inferred from
+  a username.
+* **Which logical agent?** Snowflake when it names one, otherwise the
+  ``QUERY_TAG`` the agent stamps itself — a claim, not an observation, and
+  labelled as such.
+* **Which actor/session?** ``USER_NAME`` / ``USER_TYPE``, as before.
+
+Native identity wins over the tag when both exist, because Snowflake observed
+it and the tag is self-declared — but both values are always preserved and
+their agreement recorded. A row that is provably agentic yet names no agent
+anywhere is dropped rather than pinned on an invented identity; see Q24, that
+gap is now the interesting one.
 
 **Fan-out.** One query can touch several objects, and each is its own governance
 question — a SELECT joining ``SALES`` to ``HR`` is an HR access no matter what
@@ -31,6 +48,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -99,11 +117,27 @@ _KNOWN_COLUMNS = frozenset(
         "BASE_OBJECTS_ACCESSED",
         "OBJECTS_MODIFIED",
         "CORTEX_FUNCTIONS",
+        "AGENT_TYPE",
+        "AGENTS_INFO",
     }
 )
 
+# Native agent types Snowflake reports. Listed so an unfamiliar value is
+# preserved verbatim rather than silently normalised into one of these.
+NATIVE_AGENT_TYPES = frozenset({"CORTEX_AGENT", "CORTEX_LITE_AGENT", "EXTERNAL_AGENT"})
 
-class SnowflakeTagError(ValueError):
+
+class SnowflakeAttributionError(ValueError):
+    """The row named no agent ACP can honestly use.
+
+    Two distinct situations, and the message says which: the query was not
+    agentic at all, or it was provably agentic but nothing — native telemetry
+    or tag — identified *which* agent. The second is a real visibility gap and
+    is counted as a drop rather than papered over with a fabricated id.
+    """
+
+
+class SnowflakeTagError(SnowflakeAttributionError):
     """QUERY_TAG did not carry usable ACP attribution."""
 
 
@@ -143,6 +177,156 @@ def parse_query_tag(raw: Any) -> dict[str, Any]:
     if not acp.get("run"):
         raise SnowflakeTagError("QUERY_TAG carries no run id")
     return acp
+
+
+def read_query_tag(raw: Any) -> dict[str, Any]:
+    """The ``acp`` object if the tag carries one, else empty.
+
+    Lenient counterpart to :func:`parse_query_tag`. Attribution can now come
+    from Snowflake itself, so a missing or partial tag is no longer
+    automatically fatal — it just contributes nothing.
+    """
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    acp = parsed.get("acp")
+    return acp if isinstance(acp, dict) else {}
+
+
+def read_agents_info(raw: Any) -> tuple[dict[str, Any], ...]:
+    """``ACCESS_HISTORY.AGENTS_INFO``, order preserved.
+
+    Snowflake orders this nearest-invoking-agent first, top-level agent last.
+    That ordering is the meaning of the array, so it is kept exactly as given
+    and never sorted or deduplicated.
+    """
+    if not isinstance(raw, list):
+        return ()
+    return tuple(entry for entry in raw if isinstance(entry, dict))
+
+
+def _native_identity(agents_info: tuple[dict[str, Any], ...]) -> tuple[str | None, int | None]:
+    """Nearest entry that actually names an agent, and its index.
+
+    Walks outward from the direct invoker rather than reading index 0 blindly:
+    a lite agent with no identity may have been invoked by a named Cortex
+    agent, and the named one is the honest attribution. The index is recorded
+    in provenance so "how far out did we have to look" stays auditable.
+    """
+    for index, entry in enumerate(agents_info):
+        identity = entry.get("agentId") or entry.get("agentName")
+        if identity:
+            return str(identity), index
+    return None, None
+
+
+@dataclass(frozen=True, slots=True)
+class Attribution:
+    """Who ACP thinks ran this query, and on whose word.
+
+    Every field pairs a value with its origin. The point is that a reader
+    months later can tell an identity Snowflake observed from one an agent
+    claimed about itself, without re-reading the extract.
+    """
+
+    agent_id: str
+    agent_id_source: str
+    correlation_id: str
+    correlation_id_source: str
+    agent_type: str | None
+    agent_type_source: str | None
+    agents_info: tuple[dict[str, Any], ...]
+    native_agent_id: str | None
+    native_agent_index: int | None
+    tag_agent_id: str | None
+    tag: dict[str, Any]
+
+    @property
+    def is_native_agentic(self) -> bool:
+        """Snowflake itself says an agent invoked this."""
+        return self.agent_type is not None
+
+    @property
+    def identity_agreement(self) -> str:
+        """How the two identity sources relate.
+
+        `differ` is the ordinary case when both exist, not an anomaly: a
+        Snowflake agent name and an ACP agent id live in different namespaces
+        and would not be expected to match. It records that ACP kept both
+        rather than that something is wrong. No rule reads this.
+        """
+        if self.native_agent_id and self.tag_agent_id:
+            return "agree" if self.native_agent_id == self.tag_agent_id else "differ"
+        if self.native_agent_id:
+            return "only_native"
+        return "only_query_tag"
+
+
+def resolve_attribution(record: dict[str, Any], query_id: str) -> Attribution:
+    """Decide agent identity, agent type and run id from one row.
+
+    Precedence for *identity* is native-then-tag, because Snowflake observed
+    one and the agent asserted the other. Precedence for *type* is the
+    dedicated `AGENT_TYPE` column, then the nearest `AGENTS_INFO` entry.
+    Neither is a blanket "native always wins": a native type with no native
+    name still leaves the tag as the identity, which is exactly the
+    `CORTEX_LITE_AGENT` and `EXTERNAL_AGENT` case.
+    """
+    agents_info = read_agents_info(record.get("AGENTS_INFO"))
+    tag = read_query_tag(record.get("QUERY_TAG"))
+
+    declared = record.get("AGENT_TYPE")
+    agent_type = str(declared).upper() if declared else None
+    agent_type_source = "query_history.agent_type" if agent_type else None
+    if agent_type is None and agents_info and (nearest := agents_info[0].get("agentType")):
+        agent_type, agent_type_source = str(nearest).upper(), "snowflake_agents_info"
+
+    native_agent_id, native_index = _native_identity(agents_info)
+    tag_agent_id = str(tag["agent"]) if tag.get("agent") else None
+
+    if native_agent_id:
+        agent_id, agent_id_source = native_agent_id, "snowflake_agents_info"
+    elif tag_agent_id:
+        agent_id, agent_id_source = tag_agent_id, "query_tag"
+    elif agent_type:
+        # Provably agentic, and nobody named the agent. Emitting would mean
+        # inventing an identity — USER_NAME is the session, not the agent.
+        raise SnowflakeAttributionError(
+            f"{agent_type} activity with no resolvable agent identity: "
+            "AGENTS_INFO named no agent and QUERY_TAG carries none"
+        )
+    else:
+        raise SnowflakeTagError(
+            "no agent attribution: Snowflake reported no agent telemetry "
+            "and QUERY_TAG carries no agent id"
+        )
+
+    # A tagged run keeps grouping the query into its ACP run. Without one, the
+    # query is its own single-event run: Snowflake has no run envelope, which
+    # is the same reason its chains are already multi-root.
+    if tag.get("run"):
+        correlation_id, correlation_id_source = str(tag["run"]), "query_tag"
+    else:
+        correlation_id, correlation_id_source = query_id, "query_id"
+
+    return Attribution(
+        agent_id=agent_id,
+        agent_id_source=agent_id_source,
+        correlation_id=correlation_id,
+        correlation_id_source=correlation_id_source,
+        agent_type=agent_type,
+        agent_type_source=agent_type_source,
+        agents_info=agents_info,
+        native_agent_id=native_agent_id,
+        native_agent_index=native_index,
+        tag_agent_id=tag_agent_id,
+        tag=tag,
+    )
 
 
 def _status(record: dict[str, Any]) -> tuple[Status, str | None, str | None]:
@@ -193,7 +377,7 @@ def _cost_usd(record: dict[str, Any], credit_rate_usd: float | None) -> float | 
     return round(credits * credit_rate_usd, 6)
 
 
-def _metadata(record: dict[str, Any], *, acp: dict[str, Any]) -> dict[str, Any]:
+def _metadata(record: dict[str, Any], *, attribution: Attribution) -> dict[str, Any]:
     extra: dict[str, Any] = {k: v for k, v in record.items() if k not in _KNOWN_COLUMNS}
     extra["query_id"] = record["QUERY_ID"]
     extra["query_type"] = record.get("QUERY_TYPE")
@@ -203,11 +387,32 @@ def _metadata(record: dict[str, Any], *, acp: dict[str, Any]) -> dict[str, Any]:
         extra["warehouse_name"] = warehouse
     if credits := record.get("CREDITS_USED_CLOUD_SERVICES"):
         extra["credits_used_cloud_services"] = credits
-    if step := acp.get("step"):
+    if step := attribution.tag.get("step"):
         extra["agent_step"] = step
-    # The tool name is the agent's own claim, not something Snowflake observed.
-    # Recording which fields came from the tag keeps that boundary auditable.
-    extra["attributed_by"] = "query_tag"
+
+    # Where each answer came from. Small and flat on purpose — this is a
+    # record of provenance, not a provenance subsystem. Both identities are
+    # kept even when only one was used, so nothing is thrown away.
+    extra["attribution"] = {
+        "agent_id_source": attribution.agent_id_source,
+        "agent_type": attribution.agent_type,
+        "agent_type_source": attribution.agent_type_source,
+        "actor_id_source": "snowflake_user",
+        "correlation_id_source": attribution.correlation_id_source,
+        "identity_agreement": attribution.identity_agreement,
+        "native_agent_id": attribution.native_agent_id,
+        "native_agent_index": attribution.native_agent_index,
+        "query_tag_agent_id": attribution.tag_agent_id,
+    }
+    # The full ordered chain, verbatim. Nearest invoker first. Deliberately not
+    # turned into parent_event_id edges: these are attribution context for one
+    # query, not separate observed ACP events. See Q24.
+    if attribution.agents_info:
+        extra["snowflake_agents_info"] = [dict(entry) for entry in attribution.agents_info]
+
+    # Kept as the one-word summary older readers and the docs use. It now names
+    # whichever source supplied the identity, not always the tag.
+    extra["attributed_by"] = attribution.agent_id_source
     return extra
 
 
@@ -230,9 +435,7 @@ def to_events(
     if not query_id:
         raise ValueError("record is missing QUERY_ID")
 
-    acp = parse_query_tag(record.get("QUERY_TAG"))
-    agent_id = str(acp["agent"])
-    correlation_id = str(acp["run"])
+    attribution = resolve_attribution(record, str(query_id))
 
     query_type = str(record.get("QUERY_TYPE") or "").upper()
     if query_type not in _QUERY_TYPE_ACTIONS:
@@ -249,13 +452,15 @@ def to_events(
     duration_ms = int(elapsed) if elapsed is not None else None
 
     cortex = record.get("CORTEX_FUNCTIONS") or {}
-    metadata = _metadata(record, acp=acp)
+    metadata = _metadata(record, attribution=attribution)
 
     common: dict[str, Any] = {
         "tenant_id": tenant_id,
         "timestamp": timestamp,
         "platform": Platform.SNOWFLAKE,
-        "agent_id": agent_id,
+        "agent_id": attribution.agent_id,
+        # Actor stays the session/user. Never collapsed into agent identity:
+        # a SERVICE_AGENT user is who connected, not which agent reasoned.
         "actor_id": record.get("USER_NAME"),
         "actor_type": actor_type,
         "status": status,
@@ -263,7 +468,7 @@ def to_events(
         "error_message": error_message,
         "duration_ms": duration_ms,
         "estimated_cost_usd": _cost_usd(record, credit_rate_usd),
-        "correlation_id": correlation_id,
+        "correlation_id": attribution.correlation_id,
         "source_adapter": ADAPTER_NAME,
     }
 
@@ -295,7 +500,7 @@ def to_events(
         # about. Not an error, just not an event.
         return []
 
-    tool_name = acp.get("tool")
+    tool_name = attribution.tag.get("tool")
     event_type = EventType.TOOL_CALL if tool_name else EventType.DATA_ACCESS
     registry = domains or DataDomainRegistry()
 

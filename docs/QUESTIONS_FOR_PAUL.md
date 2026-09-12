@@ -334,15 +334,52 @@ a `QUERY_ID` join across `QUERY_HISTORY`, `ACCESS_HISTORY`,
 `SnowflakeActivitySource._read_records` with a cursor over that same join.
 Nothing above the adapter changes. What *does* need deciding first:
 
-**1. `QUERY_TAG` is load-bearing, and it is not ours.** Agent attribution comes
-only from a JSON tag the agent stamps itself. No tag, no event — a query we
-cannot attribute is dropped rather than pinned on an invented agent. That is
-the honest behaviour, but it means **an agent that forgets to stamp its tag
-becomes invisible to governance**, which is the wrong direction for a failure
-to point. Before going live, either enforce the tag (a Snowflake session policy
-or a wrapper the agents must use), or accept the gap knowingly and monitor the
-drop count. Today it is only logged. 🔴 — this is the one that decides whether
-real Snowflake coverage is trustworthy.
+**1. `QUERY_TAG` is no longer the only way in — but a gap remains.**
+*Revised: Snowflake now exposes native agent telemetry, which makes the
+original framing stale.*
+
+`QUERY_HISTORY.AGENT_TYPE` (`CORTEX_AGENT`, `CORTEX_LITE_AGENT`,
+`EXTERNAL_AGENT`, or null) and `ACCESS_HISTORY.AGENTS_INFO` (an ordered array
+of invoking agents, nearest first) mean Snowflake can now tell us *that*
+activity was agentic without any cooperation from the agent. Snowflake can also
+mark external sessions agentic via `SERVICE_AGENT` users or an OAuth
+integration configured `IS_AGENTIC = TRUE`. The adapter consumes all of this;
+tag-only attribution is no longer required to detect agentic activity.
+
+What that does **not** give us is universal *identity*. Being able to say "an
+agent did this" is not being able to say "which agent":
+
+* `CORTEX_AGENT` can carry a fully qualified name — this is the good case, and
+  ACP uses it directly, with `attribution.agent_id_source =
+  "snowflake_agents_info"`.
+* `CORTEX_LITE_AGENT` does not necessarily represent a stable named agent.
+* `EXTERNAL_AGENT` may arrive with `agentId` and `agentName` both null.
+
+So the remaining gap is narrower and more precisely stated than before:
+**activity Snowflake marks as agentic but names no agent for, and which
+supplies no ACP `QUERY_TAG`, is dropped** — we will not promote `USER_NAME`
+into an agent identity to force emission. Separately, an external workload that
+Snowflake does not identify as agent-active *and* stamps no tag remains
+invisible, exactly as an untagged human query does. Neither is complete
+discovery coverage and neither should be described as such.
+
+Two things follow. First, `QUERY_TAG` is still worth enforcing — not for
+detection any more, but because it is the only source of the ACP *run* id, the
+logical tool name, and an application-level agent identity for the lite and
+external cases. Second, the drop count is now the interesting metric and it is
+still only logged: an "agentic, unidentifiable" drop is a governance gap, while
+a "not agentic" drop is not, and the adapter's messages already distinguish
+them. 🟡 — downgraded from 🔴: native telemetry closes the detection half, the
+identity half is now the open question.
+
+**1b. Trust Center AI Agents Inventory — future work, not this task.**
+Snowflake's Trust Center AI Security experience exposes an inventory of Cortex
+agents. That is a *declared* inventory, and ACP currently only observes. It is
+the natural counterpart to the drop above: a declared-versus-observed
+reconciliation would turn "we saw an agent we cannot name" into "we saw an
+agent that is not in the inventory". Worth evaluating as an inventory source
+when agent-discovery work is scoped. Deliberately not integrated here — this
+maintenance pass is about event attribution only. 🟢
 
 **2. `ACCOUNT_USAGE` latency.** These views lag, historically up to ~45 minutes
 for `QUERY_HISTORY` and longer for `ACCESS_HISTORY`. Any "current state" claim

@@ -104,8 +104,9 @@ def test_runs_lists_every_run_newest_first(
 ) -> None:
     assert _run(seeded_db, "runs") == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-    # 9 synthetic + 1 MCP + 1 Snowflake.
-    assert len(lines) == 11
+    # 9 synthetic + 1 MCP + 3 Snowflake (one tagged ACP run, plus two
+    # natively-attributed queries that carried no tag and stand alone).
+    assert len(lines) == 13
 
     dates = [line.split()[0] for line in lines]
     assert dates == sorted(dates, reverse=True)

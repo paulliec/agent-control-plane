@@ -401,7 +401,10 @@ def test_runs_are_newest_first_and_cover_every_source(console: DashboardService)
 
 def test_run_filters(console: DashboardService) -> None:
     snowflake = console.runs(RunFilter(sources=frozenset({"snowflake"})))
-    assert [r.correlation_id for r in snowflake] == [SNOWFLAKE_RUN]
+    # The tagged ACP run plus the natively-attributed queries that carried no
+    # tag; each of those is legitimately its own single-event run.
+    assert SNOWFLAKE_RUN in [r.correlation_id for r in snowflake]
+    assert all(r.sources == ("snowflake",) for r in snowflake)
 
     violating = console.runs(RunFilter(violations_only=True))
     assert violating and all(r.violation_count > 0 for r in violating)
@@ -453,7 +456,10 @@ def test_a_scalar_evidence_value_is_normalised_to_a_list() -> None:
 
 def test_run_limit_applies_after_filtering(console: DashboardService) -> None:
     assert len(console.runs(limit=2)) == 2
-    assert len(console.runs(RunFilter(sources=frozenset({"snowflake"})), limit=5)) == 1
+    only_snowflake = RunFilter(sources=frozenset({"snowflake"}))
+    snowflake = console.runs(only_snowflake)
+    assert len(console.runs(only_snowflake, limit=1)) == 1
+    assert len(console.runs(only_snowflake, limit=99)) == len(snowflake)
 
 
 def test_a_snowflake_run_is_multi_root(console: DashboardService) -> None:

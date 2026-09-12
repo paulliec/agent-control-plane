@@ -288,7 +288,9 @@ def _sf_results(cp: ControlPlane, *, violations_only: bool = False) -> list[Poli
 
 def test_snowflake_events_persist_and_are_queryable(seeded: ControlPlane) -> None:
     events = seeded.repository.list_events(seeded.tenant_id, correlation_id=SNOWFLAKE_RUN)
-    assert len(events) == 9
+    # 9 from the original tagged queries, plus the Cortex rows that carry the
+    # same ACP run tag (11020, 11023).
+    assert len(events) == 11
     assert {e.source_adapter for e in events} == {"snowflake"}
     assert {e.tenant_id for e in events} == {seeded.tenant_id}
     # Traceable back to the source row without Snowflake leaking into the model.
@@ -364,7 +366,9 @@ def test_a_snowflake_chain_reconstructs_without_a_run_envelope(
 def test_snowflake_participates_in_analytics(seeded: ControlPlane) -> None:
     summary = seeded.analytics.run_summary(SNOWFLAKE_RUN)
     assert summary is not None
-    assert summary.agent_ids == ("agt_forecast_weekly",)
+    # Two agents in one run: the tagged external agent, and the native Cortex
+    # agent Snowflake named itself on a query carrying the same run tag.
+    assert set(summary.agent_ids) == {"agt_forecast_weekly", "SALES_AI.PUBLIC.FORECAST_COPILOT"}
     assert summary.initiated_by == "SVC_FORECAST_AGENT"
     # A refused delete and a failed query, with no terminal event to say
     # otherwise, is a failed run.
@@ -412,7 +416,7 @@ def test_reingesting_the_extract_is_idempotent(seeded: ControlPlane) -> None:
         )
     )
     assert result.written == 0
-    assert result.duplicates == result.fetched == 9
+    assert result.duplicates == result.fetched == 13
     assert seeded.repository.count_events(seeded.tenant_id) == before
 
 

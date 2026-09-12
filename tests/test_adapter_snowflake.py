@@ -1,22 +1,28 @@
 """Snowflake activity adapter.
 
-The theme throughout: Snowflake knows what SQL ran; only the agent's own
-QUERY_TAG knows which agent ran it. These tests pin down where that line sits
-and what happens when the tag is missing.
+The theme throughout: three questions with three different answerers.
+Snowflake knows what SQL ran and - natively, now - whether an agent invoked
+it. Which *logical* agent is sometimes Snowflake's answer and sometimes only
+the agent's own QUERY_TAG. USER_NAME is neither. These tests pin down where
+each line sits, and what happens when nobody can answer.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from agent_control_plane.adapters.base import AdapterError, EventSource, NormalizationError
 from agent_control_plane.adapters.snowflake import (
     SnowflakeActivitySource,
+    SnowflakeAttributionError,
     SnowflakeTagError,
     parse_query_tag,
+    read_agents_info,
+    resolve_attribution,
     to_events,
 )
 from agent_control_plane.config import REPO_ROOT
@@ -392,13 +398,19 @@ def test_a_query_that_touched_nothing_yields_no_events() -> None:
 
 def test_reads_the_committed_extract(shipped_domains: DataDomainRegistry) -> None:
     events = list(SnowflakeActivitySource(EXTRACT, domains=shipped_domains).fetch())
-    # 12 rows: 3 unmappable (untagged, malformed tag, USE), 1 touching nothing,
-    # and one two-object query fanning out - so 8 rows become 9 events.
-    assert len(events) == 9
-    assert {e.correlation_id for e in events} == {RUN}
+    # 17 rows. Four are unmappable: not agentic (11009), USE (11012), and two
+    # that are provably agentic but name no agent anywhere (11010, 11022).
+    # One touches nothing; one fans out to two objects. 12 rows -> 13 events.
+    assert len(events) == 13
     assert {e.source_adapter for e in events} == {"snowflake"}
     assert {e.platform for e in events} == {Platform.SNOWFLAKE}
-    assert len({e.event_id for e in events}) == 9, "event ids must be unique"
+    assert len({e.event_id for e in events}) == 13, "event ids must be unique"
+
+    # Three runs now: the tagged ACP run, plus two natively-attributed queries
+    # that carried no tag and are therefore each their own single-event run.
+    assert RUN in {e.correlation_id for e in events}
+    untagged = [e for e in events if e.correlation_id != RUN]
+    assert {e.correlation_id for e in untagged} == {e.metadata["query_id"] for e in untagged}
 
 
 def test_the_committed_extract_covers_the_governance_cases(
@@ -449,3 +461,284 @@ def test_strict_mode_raises_on_a_bad_row(tmp_path: Path) -> None:
 def test_missing_file_is_an_adapter_error(tmp_path: Path) -> None:
     with pytest.raises(AdapterError, match="not found"):
         list(SnowflakeActivitySource(tmp_path / "nope.jsonl").fetch())
+
+
+# -- native agent attribution ---------------------------------------------
+#
+# Snowflake now reports QUERY_HISTORY.AGENT_TYPE and ACCESS_HISTORY.AGENTS_INFO.
+# The old rule ("no tag, no event") is stale, but the replacement is not "native
+# always wins" either: a native *type* with no native *name* still leaves the
+# tag as the only identity, which is exactly the lite/external case.
+
+CORTEX_AGENT_ID = "SALES_AI.PUBLIC.FORECAST_COPILOT"
+
+
+def _agents_info(*entries: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(entries)
+
+
+def _cortex(**kw: Any) -> dict[str, Any]:
+    return {
+        "agentType": "CORTEX_AGENT",
+        "agentId": CORTEX_AGENT_ID,
+        "agentName": "Forecast Copilot",
+        **kw,
+    }
+
+
+def _lite(**kw: Any) -> dict[str, Any]:
+    return {"agentType": "CORTEX_LITE_AGENT", "agentId": None, "agentName": None, **kw}
+
+
+def test_a_named_cortex_agent_supplies_its_own_identity() -> None:
+    """Snowflake observed this name. It outranks a tag the agent wrote itself."""
+    event = _one(AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+
+    assert event.agent_id == CORTEX_AGENT_ID
+    attribution = event.metadata["attribution"]
+    assert attribution["agent_id_source"] == "snowflake_agents_info"
+    assert attribution["agent_type"] == "CORTEX_AGENT"
+    assert attribution["agent_type_source"] == "query_history.agent_type"
+
+
+def test_native_identity_needs_no_query_tag() -> None:
+    """The headline change. Snowflake alone is now enough to emit an event."""
+    event = _one(QUERY_TAG="", AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+
+    assert event.agent_id == CORTEX_AGENT_ID
+    assert event.metadata["attribution"]["agent_id_source"] == "snowflake_agents_info"
+
+
+def test_an_untagged_native_query_becomes_its_own_run() -> None:
+    """There is no run envelope to join, and inventing one would group
+    unrelated queries. The query id is the honest correlation id."""
+    event = _one(QUERY_TAG="", AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+
+    assert event.correlation_id == event.metadata["query_id"]
+    assert event.metadata["attribution"]["correlation_id_source"] == "query_id"
+
+
+def test_a_tagged_run_still_groups_natively_identified_queries() -> None:
+    event = _one(AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+    assert event.correlation_id == RUN
+    assert event.metadata["attribution"]["correlation_id_source"] == "query_tag"
+
+
+def test_a_lite_agent_proves_activity_without_proving_identity() -> None:
+    """CORTEX_LITE_AGENT need not be a stable named agent. The type is real
+    telemetry; the identity still has to come from the tag."""
+    event = _one(AGENT_TYPE="CORTEX_LITE_AGENT", AGENTS_INFO=_agents_info(_lite()))
+
+    assert event.agent_id == "agt_forecast_weekly"
+    attribution = event.metadata["attribution"]
+    assert attribution["agent_id_source"] == "query_tag"
+    assert attribution["agent_type"] == "CORTEX_LITE_AGENT"
+    assert attribution["native_agent_id"] is None
+
+
+def test_an_external_agent_with_null_identity_falls_back_to_the_tag() -> None:
+    """An agentic OAuth integration marks the session, not the agent."""
+    external = {"agentType": "EXTERNAL_AGENT", "agentId": None, "agentName": None}
+    event = _one(AGENT_TYPE="EXTERNAL_AGENT", AGENTS_INFO=_agents_info(external))
+
+    assert event.agent_id == "agt_forecast_weekly"
+    assert event.metadata["attribution"]["agent_id_source"] == "query_tag"
+    assert event.metadata["attribution"]["agent_type"] == "EXTERNAL_AGENT"
+
+
+def test_agentic_activity_with_no_identity_anywhere_is_dropped() -> None:
+    """The honest failure. We know an agent did this and cannot say which, so
+    we say nothing rather than pin it on the session user. This is the Q24 gap."""
+    with pytest.raises(SnowflakeAttributionError, match="no resolvable agent identity"):
+        to_events(
+            _row(QUERY_TAG="", AGENT_TYPE="CORTEX_LITE_AGENT", AGENTS_INFO=_agents_info(_lite()))
+        )
+
+
+def test_the_drop_reason_names_the_agent_type_it_could_not_identify() -> None:
+    """A drop that says which kind of agent got away is a measurable gap; a
+    bare 'unattributable' is not."""
+    with pytest.raises(SnowflakeAttributionError, match="CORTEX_LITE_AGENT"):
+        to_events(_row(QUERY_TAG="", AGENT_TYPE="CORTEX_LITE_AGENT"))
+
+
+def test_a_username_never_becomes_an_agent_id() -> None:
+    """SERVICE_AGENT users and agentic OAuth mark a session as agentic. That is
+    not a licence to promote USER_NAME into agent identity."""
+    with pytest.raises(SnowflakeAttributionError):
+        to_events(_row(QUERY_TAG="", AGENT_TYPE="EXTERNAL_AGENT", USER_NAME="SVC_SOME_AGENT"))
+
+
+def test_a_non_agent_query_is_still_not_agent_activity() -> None:
+    """Unchanged behaviour, now stated by Snowflake rather than inferred."""
+    with pytest.raises(SnowflakeTagError, match="no agent attribution"):
+        to_events(_row(QUERY_TAG="", AGENT_TYPE=None, AGENTS_INFO=None))
+
+
+def test_agent_type_is_never_inferred_from_a_username() -> None:
+    event = _one(USER_NAME="SVC_CORTEX_AGENT")
+    assert event.metadata["attribution"]["agent_type"] is None
+    assert event.metadata["attribution"]["agent_type_source"] is None
+
+
+def test_agent_type_falls_back_to_the_nearest_agents_info_entry() -> None:
+    """Some extracts join ACCESS_HISTORY without the QUERY_HISTORY column."""
+    event = _one(AGENTS_INFO=_agents_info(_lite()))
+    assert event.metadata["attribution"]["agent_type"] == "CORTEX_LITE_AGENT"
+    assert event.metadata["attribution"]["agent_type_source"] == "snowflake_agents_info"
+
+
+# -- actor stays separate from agent --------------------------------------
+
+
+def test_actor_identity_never_collapses_into_agent_identity() -> None:
+    """Two different questions, and the answer differs even when both exist."""
+    event = _one(
+        AGENT_TYPE="CORTEX_AGENT",
+        AGENTS_INFO=_agents_info(_cortex()),
+        USER_NAME="SVC_CORTEX_RUNTIME",
+        USER_TYPE="SNOWFLAKE_SERVICE",
+    )
+    assert event.agent_id == CORTEX_AGENT_ID
+    assert event.actor_id == "SVC_CORTEX_RUNTIME"
+    assert event.actor_type is ActorType.SYSTEM
+    assert event.metadata["attribution"]["actor_id_source"] == "snowflake_user"
+
+
+# -- native and tag disagreeing -------------------------------------------
+
+
+def test_both_identities_survive_when_they_disagree() -> None:
+    """Neither value is discarded. The namespaces differ by nature, so this is
+    the ordinary case rather than an anomaly - and no rule reads it."""
+    event = _one(AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+    attribution = event.metadata["attribution"]
+
+    assert attribution["identity_agreement"] == "differ"
+    assert attribution["native_agent_id"] == CORTEX_AGENT_ID
+    assert attribution["query_tag_agent_id"] == "agt_forecast_weekly"
+    assert event.agent_id == CORTEX_AGENT_ID, "native wins, but the tag is still on record"
+
+
+def test_agreement_is_recorded_when_both_sources_match() -> None:
+    matching = {"agentType": "EXTERNAL_AGENT", "agentId": "agt_forecast_weekly"}
+    event = _one(AGENT_TYPE="EXTERNAL_AGENT", AGENTS_INFO=_agents_info(matching))
+    assert event.metadata["attribution"]["identity_agreement"] == "agree"
+
+
+def test_a_single_source_says_so_rather_than_claiming_agreement() -> None:
+    assert _one().metadata["attribution"]["identity_agreement"] == "only_query_tag"
+
+    native_only = _one(QUERY_TAG="", AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+    assert native_only.metadata["attribution"]["identity_agreement"] == "only_native"
+
+
+# -- the AGENTS_INFO chain ------------------------------------------------
+
+
+def test_the_agents_info_chain_is_preserved_in_order() -> None:
+    """Nearest invoker first, top-level last. The order is the meaning."""
+    chain = _agents_info(_lite(), _cortex())
+    event = _one(AGENT_TYPE="CORTEX_LITE_AGENT", AGENTS_INFO=chain)
+
+    stored = event.metadata["snowflake_agents_info"]
+    assert [e["agentType"] for e in stored] == ["CORTEX_LITE_AGENT", "CORTEX_AGENT"]
+    assert stored == chain
+
+
+def test_identity_comes_from_the_nearest_entry_that_has_one() -> None:
+    """A lite agent invoked by a named one attributes to the named one, and
+    records how far out it had to look."""
+    event = _one(AGENT_TYPE="CORTEX_LITE_AGENT", AGENTS_INFO=_agents_info(_lite(), _cortex()))
+
+    assert event.agent_id == CORTEX_AGENT_ID
+    assert event.metadata["attribution"]["native_agent_index"] == 1
+    # The direct invoker is still the lite agent; identity and type differ.
+    assert event.metadata["attribution"]["agent_type"] == "CORTEX_LITE_AGENT"
+
+
+def test_the_chain_is_not_turned_into_execution_edges() -> None:
+    """AGENTS_INFO is attribution context for one query, not observed ACP
+    events. Minting parent edges from it would invent a call tree."""
+    event = _one(AGENT_TYPE="CORTEX_LITE_AGENT", AGENTS_INFO=_agents_info(_lite(), _cortex()))
+    assert event.parent_event_id is None
+
+
+def test_a_malformed_agents_info_is_ignored_not_fatal() -> None:
+    assert read_agents_info(None) == ()
+    assert read_agents_info("CORTEX_AGENT") == ()
+    assert read_agents_info([{"agentType": "CORTEX_AGENT"}, "junk"]) == (
+        {"agentType": "CORTEX_AGENT"},
+    )
+
+
+def test_an_empty_chain_leaves_no_metadata_key() -> None:
+    """An empty array should not litter every event with a dead key."""
+    assert "snowflake_agents_info" not in _one().metadata
+
+
+# -- QUERY_TAG keeps earning its place ------------------------------------
+
+
+def test_the_tag_still_supplies_the_run_and_the_tool() -> None:
+    """Native telemetry says nothing about ACP runs or logical tool names."""
+    event = _one(
+        QUERY_TAG=_tag(tool="sales.query_history", step="pull-orders"),
+        AGENT_TYPE="CORTEX_AGENT",
+        AGENTS_INFO=_agents_info(_cortex()),
+    )
+    assert event.correlation_id == RUN
+    assert event.tool_name == "sales.query_history"
+    assert event.event_type is EventType.TOOL_CALL
+    assert event.metadata["agent_step"] == "pull-orders"
+
+
+def test_resolve_attribution_is_deterministic() -> None:
+    row = _row(AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+    assert resolve_attribution(row, "q1") == resolve_attribution(row, "q1")
+
+
+# -- regressions the attribution change must not cause --------------------
+
+
+def test_native_attribution_does_not_disturb_cost() -> None:
+    """Q9 behaviour is untouched: credits become dollars only with a rate."""
+    row = _row(AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+    assert to_events(row)[0].estimated_cost_usd is None
+    assert to_events(row, credit_rate_usd=3.0)[0].estimated_cost_usd == pytest.approx(0.002193)
+
+
+def test_native_attribution_does_not_disturb_fan_out() -> None:
+    events = to_events(
+        _row(
+            AGENT_TYPE="CORTEX_AGENT",
+            AGENTS_INFO=_agents_info(_cortex()),
+            BASE_OBJECTS_ACCESSED=[
+                {"objectName": "SALES_PROD.PUBLIC.FCT_ORDERS"},
+                {"objectName": "HR.PUBLIC.DIM_EMPLOYEE"},
+            ],
+        )
+    )
+    assert len(events) == 2
+    assert all(e.agent_id == CORTEX_AGENT_ID for e in events)
+
+
+def test_native_attribution_keeps_fingerprints_stable() -> None:
+    """agent_id feeds the fingerprint, so a changed attribution path would
+    silently re-key events. Same inputs must give the same fingerprint."""
+    row = _row(AGENT_TYPE="CORTEX_AGENT", AGENTS_INFO=_agents_info(_cortex()))
+    assert to_events(row)[0].fingerprint() == to_events(row)[0].fingerprint()
+    # And a different attribution source really is a different event identity.
+    assert to_events(row)[0].fingerprint() != _one().fingerprint()
+
+
+def test_the_shipped_extract_exercises_every_attribution_path(
+    shipped_domains: DataDomainRegistry,
+) -> None:
+    events = list(SnowflakeActivitySource(EXTRACT, domains=shipped_domains).fetch())
+    sources = {e.metadata["attribution"]["agent_id_source"] for e in events}
+    types = {e.metadata["attribution"]["agent_type"] for e in events}
+
+    assert sources == {"query_tag", "snowflake_agents_info"}
+    assert {"EXTERNAL_AGENT", "CORTEX_AGENT", "CORTEX_LITE_AGENT"} <= types
+    assert any(e.metadata.get("snowflake_agents_info") for e in events)

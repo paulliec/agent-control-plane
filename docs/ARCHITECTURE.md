@@ -454,8 +454,11 @@ nothing above the adapter changes.
 | Snowflake | `AgentEvent` |
 |---|---|
 | `QUERY_ID` | `event_id`, and `metadata.query_id` on every fanned-out event |
-| `QUERY_TAG.acp.run` | `correlation_id` |
-| `QUERY_TAG.acp.agent` | `agent_id` |
+| `QUERY_TAG.acp.run` | `correlation_id`, falling back to `QUERY_ID` when untagged |
+| `AGENTS_INFO[].agentId/agentName` | `agent_id` when Snowflake names an agent |
+| `QUERY_TAG.acp.agent` | `agent_id` when Snowflake does not |
+| `QUERY_HISTORY.AGENT_TYPE` | `metadata.attribution.agent_type` — never an ACP field |
+| `ACCESS_HISTORY.AGENTS_INFO` | `metadata.snowflake_agents_info`, order preserved |
 | `QUERY_TAG.acp.tool` | `tool_name`, and `event_type = tool_call` when present |
 | `USER_NAME` | `actor_id` |
 | `USER_TYPE` | `actor_type` (`PERSON`→human, `SERVICE`→service) |
@@ -466,15 +469,52 @@ nothing above the adapter changes.
 | `CORTEX_FUNCTIONS.MODEL_NAME` | `model`, with `event_type = llm_call` |
 | everything unmapped | `metadata`, verbatim |
 
-**Two provenances, deliberately kept apart.** Snowflake knows what SQL ran,
-against which objects, how long it took and what it cost. It has no concept of
-an agent: `QUERY_HISTORY` has `USER_NAME` and `ROLE_NAME`, and a service
-account is not an agent identity. Agent attribution comes *only* from
-`QUERY_TAG`, which the agent stamps itself — the same epistemic status as an
-MCP client naming its own tool. Events carry `metadata.attributed_by =
-"query_tag"` so that distinction survives into the audit trail. A query with no
-parseable tag is a human running ad-hoc SQL, and is dropped rather than
-attributed to an agent invented from a username.
+**Three provenances, deliberately kept apart.** Snowflake knows what SQL ran,
+against which objects, how long it took and what it cost. It *also* now knows,
+natively, whether an agent invoked the query — `QUERY_HISTORY.AGENT_TYPE` and
+`ACCESS_HISTORY.AGENTS_INFO`. What it does not always know is *which logical
+agent*. So the adapter answers three questions separately and records who
+answered each, in `metadata.attribution`:
+
+| Question | Answered by | Recorded as |
+|---|---|---|
+| Is this agentic, and what type? | Snowflake, natively | `agent_type`, `agent_type_source` |
+| Which logical agent? | Snowflake if it names one, else `QUERY_TAG` | `agent_id_source` |
+| Which actor/session? | `USER_NAME` / `USER_TYPE` | `actor_id_source` |
+
+**Identity precedence is native-then-tag, and that is not the same as "native
+wins".** A native *type* with no native *name* leaves the tag as the only
+identity — exactly the `CORTEX_LITE_AGENT` and `EXTERNAL_AGENT` case, where
+Snowflake proves the activity was agentic without identifying the agent. When
+Snowflake *does* name an agent, that name wins over the tag because Snowflake
+observed it and the tag is self-declared. Both values are always kept, and
+`attribution.identity_agreement` records whether they matched
+(`agree` / `differ` / `only_native` / `only_query_tag`). `differ` is the
+ordinary case, not an alarm: a Snowflake agent name and an ACP agent id live in
+different namespaces. No policy rule reads any of this.
+
+`AGENTS_INFO` is stored verbatim, ordered nearest-invoker-first, and is
+deliberately *not* turned into `parent_event_id` edges — it is attribution
+context for one query, not separate observed events. Identity is taken from the
+nearest entry that actually carries one, with the index recorded, so a lite
+agent invoked by a named Cortex agent attributes to the named one.
+
+**Emit / drop, by attribution case.** `USER_NAME` never becomes an `agent_id`:
+a `SERVICE_AGENT` user or an `IS_AGENTIC` OAuth integration marks a *session*
+as agentic, which is not a licence to promote it into agent identity.
+
+| `AGENT_TYPE` | Native name | `QUERY_TAG` | Outcome |
+|---|---|---|---|
+| any | present | present | emit — native id, tag kept alongside |
+| any | present | absent | emit — native id, run = `QUERY_ID` |
+| present | absent | present | emit — tag id, native type kept |
+| present | absent | absent | **drop** — agentic but unidentifiable |
+| absent | absent | present | emit — tag id (the original behaviour) |
+| absent | absent | absent | **drop** — not agent activity |
+
+The fourth row is the one that matters: we know an agent did this and cannot
+say which, so ACP says nothing rather than inventing an identity. The drop
+message names the agent type, which makes the gap countable. See Q24.
 
 **One query, many objects.** A `SELECT` joining `SALES` to `HR` is an HR access
 whatever else it did, so one row fans out to one event per accessed object,
@@ -598,7 +638,7 @@ Four presentation obligations the console owes the data:
 3. **A generated scenario is not an integration.** `source_activity` flags
    which adapters replay an authored scenario rather than an extract of real
    telemetry, so the Overview can chart them on separate axes. 143 synthetic
-   events beside 9 Snowflake ones is a scale artefact, not a coverage claim.
+   events beside 13 Snowflake ones is a scale artefact, not a coverage claim.
    Nothing is excluded from any total; only the chart axis changes.
 4. **Derived cost is labelled.** Snowflake reports credits, and the dollars are
    credits × a caller-supplied rate. `CostProvenance` names which sources

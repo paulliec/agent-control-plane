@@ -191,5 +191,5 @@ def test_the_source_chart_separates_generated_from_integration(seeded_db: Path) 
     app = _run("Overview")
     captions = " ".join(str(c.value) for c in app.caption)
     assert "Generated demo scenario, on its own scale" in captions
-    assert "mcp (10)" in captions and "snowflake (9)" in captions
+    assert "mcp (10)" in captions and "snowflake (13)" in captions
     assert "nothing is excluded" in captions

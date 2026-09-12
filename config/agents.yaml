@@ -101,5 +101,26 @@ agents:
       max_cost_usd: 0.75
       max_tool_calls: 15
 
+  # A native Snowflake Cortex agent. Snowflake names this one itself in
+  # ACCESS_HISTORY.AGENTS_INFO, so the agent_id here is Snowflake's fully
+  # qualified name rather than an ACP-minted one — attribution came from the
+  # platform, not from a QUERY_TAG the agent stamped on itself.
+  - agent_id: SALES_AI.PUBLIC.FORECAST_COPILOT
+    name: Forecast Copilot (Snowflake Cortex)
+    platform: snowflake
+    owner: analytics-platform@contoso.com
+    description: >
+      Cortex agent that summarises order history in-database. Reads sales
+      only; it calls no ACP-registered tools, hence the empty tool allowlist.
+    tags: [production, cortex]
+    governance:
+      access_mode: read_only
+      tool_access_mode: allowlist
+      allowed_tools: []
+      data_access_mode: allowlist
+      allowed_data_domains: [sales]
+      max_cost_usd: 0.50
+      max_tool_calls: 5
+
 # NOTE: agt_pricing_experiment is deliberately absent. It appears in the
 # synthetic data so the unregistered_agent rule has something to find.

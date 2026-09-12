@@ -240,12 +240,12 @@ work physically ran. The synthetic scenario emits Snowflake-platform events, so
 conflating the two would overstate how much real Snowflake coverage exists.
 
 **A generated scenario is not an integration.** The demo holds 143 synthetic
-events against 10 MCP and 9 Snowflake ones, so plotting all three on one axis
+events against 10 MCP and 13 Snowflake ones, so plotting all three on one axis
 makes the real integrations look like rounding error — a scale artefact, since
 the size of a scenario we authored is a choice rather than evidence. The
 Overview therefore charts integration extracts and the generated scenario
 separately, and states the split in words beneath. Nothing is filtered out or
-rescaled: all 162 events are counted in every metric, and the fixtures are
+rescaled: all 166 events are counted in every metric, and the fixtures are
 untouched. Hiding synthetic behind a default-off toggle was the alternative
 considered and rejected — it would have made the Overview's totals silently
 disagree with `acp stats`.
