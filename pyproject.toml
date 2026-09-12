@@ -51,6 +51,15 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # current 96.87% so a fractional shift doesn't fail the build spuriously.
 [tool.coverage.run]
 source = ["agent_control_plane"]
+# The Streamlit entry point is pure rendering, and coverage.py cannot see it:
+# the AppTest suite does execute every view, but Streamlit runs the script on
+# its own ScriptRunner thread and coverage attributes none of it back here (it
+# measures 0% even while those tests pass). Counting it would mean a ~196-line
+# permanent miss that says nothing about whether the UI works. Its logic was
+# deliberately extracted into services/dashboard.py and dashboard/presenters.py,
+# both at 100% and where a wrong number would actually come from; the page
+# itself is verified by rendering it against the seeded demo.
+omit = ["*/dashboard/app.py"]
 
 [tool.coverage.report]
 fail_under = 96
