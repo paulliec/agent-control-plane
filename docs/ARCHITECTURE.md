@@ -1,10 +1,10 @@
 # Architecture
 
-Status: Tollgate 2B, in progress. Synthetic + MCP-log + Snowflake-extract
-ingestion, SQLite persistence, rule-based policy engine, analytics, CLI. Tenancy,
-a controlled data-domain vocabulary and decision metadata landed in 2A; the
-system is still observe-only. The Snowflake adapter is fixture-backed — no
-credentials, no connector. No dashboard yet.
+Status: Tollgate 2C. Synthetic + MCP-log + Snowflake-extract ingestion, SQLite
+persistence, rule-based policy engine, analytics, CLI, Streamlit console.
+Tenancy, a controlled data-domain vocabulary and decision metadata landed in 2A;
+the system is still observe-only. The Snowflake adapter is fixture-backed — no
+credentials, no connector. The console reports; it does not enforce.
 
 ## Principle
 
@@ -12,7 +12,7 @@ One vendor-neutral domain model in the middle. Everything platform-specific is
 pushed to the edges, behind a Protocol.
 
 ```
-       cli.py                    dashboard/  (Tollgate 2)
+       cli.py                    dashboard/  (Streamlit console)
           │                           │
           └─────────────┬─────────────┘
                         │
@@ -43,7 +43,7 @@ Two rules keep this honest:
    failure, not a silent schema drift.
 
 `bootstrap.py` is the only place concrete classes are chosen. The CLI, the tests
-and (later) the dashboard all call `build_control_plane()`.
+and the dashboard all call `build_control_plane()`.
 
 ## Domain model
 
@@ -560,6 +560,54 @@ speculatively design for now.
 and policy logs stay greppable and machine-parseable without a logging
 framework.
 
+## Console
+
+`dashboard/app.py` is a Streamlit page and nothing else. It holds no SQL, no
+policy logic, no domain classification and no chain construction — every number
+it renders comes from `AnalyticsService` or `DashboardService`, and every row it
+draws comes from a pure function in `dashboard/presenters.py`.
+
+```
+dashboard/app.py          layout, widgets, navigation        (not unit-tested)
+dashboard/presenters.py   service objects -> table rows      (pure, tested)
+services/dashboard.py     filtering, enrichment, options     (pure, tested)
+services/analytics.py     aggregates                         (pure, tested)
+```
+
+The split is deliberate. Row shaping is where a dashboard is most likely to be
+quietly wrong — a mislabelled column reads as authoritative — so it lives where
+it can be asserted on. `app.py` only arranges what the layers below return.
+
+`services/dashboard.py` exists because filtering a *finding* by platform means
+joining a `PolicyResult` back to the events of its run, which is real logic with
+real edge cases. Logic inside a Streamlit callback is logic nobody can test.
+
+Like `AnalyticsService`, a `DashboardService` instance serves exactly one
+tenant, fixed at construction. Switching tenants in the sidebar rebuilds the
+services rather than filtering a shared result set, so the console cannot become
+the place tenant isolation is first bypassed.
+
+Three presentation obligations the console owes the data:
+
+1. **Source ≠ platform.** Both are charted. Conflating "which integration told
+   us" with "where the work ran" would overstate real Snowflake coverage,
+   because the synthetic scenario emits Snowflake-*platform* events.
+2. **Configuration gaps are not misconduct.** `unknown_data_domain` and
+   `unregistered_agent` are about knowledge *we* lack; every finding row carries
+   an Attribution column so they never read as a scope breach.
+3. **Derived cost is labelled.** Snowflake reports credits, and the dollars are
+   credits × a caller-supplied rate. `CostProvenance` names which sources
+   reported cost, which had it derived, and how many events carry none, so a
+   total never implies more measurement than exists. See Q9 — the model records
+   the number, not the rate's origin, so the console names the adapter.
+
+`app.py` deliberately does not cache the `ControlPlane` with
+`st.cache_resource`: Streamlit reruns on a ScriptRunner thread pool and a
+sqlite3 connection belongs to the thread that opened it, so a cached one raises
+on the second interaction. Opening per rerun costs a file handle and idempotent
+DDL. The alternative — relaxing `check_same_thread` in the repository — would
+weaken a persistence property to suit one caller's threading model.
+
 ## Testing strategy
 
 No cloud credentials, no network, deterministic throughout.
@@ -577,3 +625,4 @@ No cloud credentials, no network, deterministic throughout.
 | Adapters | Determinism, chain integrity, the scenario's intended story, malformed-record isolation |
 | Adapter honesty | Every field the source cannot support stays null or drops the record: no invented cost, token split, actor type or agent identity |
 | End-to-end | Ingest → persist → evaluate → analytics against the **committed** `config/`, so a typo in governance config fails the build |
+| Console | Query/filter/row-shaping logic unit-tested; the page itself smoke-tested with Streamlit's `AppTest` against a real three-source database, because a page can serve HTTP 200 and still raise on every interaction |

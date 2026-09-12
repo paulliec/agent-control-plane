@@ -37,20 +37,21 @@ Both shapes are reconstructable from stored events.
 
 ## Status
 
-**Tollgate 2B, in progress.** Three ingestion sources — synthetic, MCP call
-logs and Snowflake `ACCOUNT_USAGE` extracts — over SQLite persistence, a
-rule-based policy engine, analytics, a CLI, and tests. Tollgate 2A added tenancy
-on every event and every read, a controlled vocabulary for data domains, and
-decision metadata so a finding records what a gateway *would* have done.
+**Tollgate 2C.** Three ingestion sources — synthetic, MCP call logs and
+Snowflake `ACCOUNT_USAGE` extracts — over SQLite persistence, a rule-based
+policy engine, analytics, a CLI, a Streamlit console, and tests. Tollgate 2A
+added tenancy on every event and every read, a controlled vocabulary for data
+domains, and decision metadata so a finding records what a gateway *would* have
+done. 2B added the Snowflake adapter; 2C added the console.
 
 The Snowflake adapter is **fixture-backed**: it reads a committed extract, needs
-no credentials and does not import the Snowflake connector. Still observe-only,
-no dashboard yet.
+no credentials and does not import the Snowflake connector. Still observe-only —
+the console reports, it does not enforce.
 
 ## Architecture in one screen
 
 ```
-       cli.py              dashboard/ (Tollgate 2)
+       cli.py              dashboard/ (Streamlit console)
           │                     │
           └────────┬────────────┘
                    ▼
@@ -82,14 +83,17 @@ is the one that must keep working.
 
 ```powershell
 py -3.13 -m venv .venv          # or py -3.12; both work
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m pip install -e ".[dev,dashboard]"
 ```
 
 ```bash
 # macOS / Linux
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[dev,dashboard]"
 ```
+
+The `dashboard` extra pulls in Streamlit and is what the console needs; the
+core install and the CLI work without it.
 
 No cloud credentials are needed for anything in this repo.
 
@@ -185,6 +189,55 @@ violations
 
 Note the grouping: eight retries of a forbidden tool are **one** finding with
 `occurrences: 8` in the evidence, not eight findings burying the critical one.
+
+## Explore in the console
+
+The same data, the same services, in a browser. Seed first, then launch:
+
+```powershell
+.venv\Scripts\python.exe scripts\seed_demo.py --reset
+.venv\Scripts\streamlit.exe run src\agent_control_plane\dashboard\app.py
+```
+
+```bash
+# macOS / Linux
+.venv/bin/python scripts/seed_demo.py --reset
+.venv/bin/streamlit run src/agent_control_plane/dashboard/app.py
+```
+
+Streamlit prints a `localhost` URL. No credentials, no network, no external
+infrastructure — it reads the same SQLite file the CLI does.
+
+Five views, all scoped to the tenant selected in the sidebar:
+
+| View | Answers |
+|---|---|
+| **Overview** | How much activity, from which sources and platforms, how many findings, what enforcement *would* have stopped, what it cost |
+| **Runs** | Browsable execution chains with source, platform, status, duration, cost, findings and max severity; filterable, drillable into a trace |
+| **Findings** | Every policy violation, filterable by source, platform, agent, rule, severity, data domain and would-block |
+| **Trace** | One execution chain as a call tree, with the findings it produced and the raw source metadata behind an expander |
+| **Data domains & cost** | Activity and spend per governance domain, including the unclassified bucket |
+
+Two things the console is deliberately careful about:
+
+**Source is not platform.** The Overview charts both. `source` is which
+integration told us (`synthetic`, `mcp`, `snowflake`); `platform` is where the
+work physically ran. The synthetic scenario emits Snowflake-platform events, so
+conflating the two would overstate how much real Snowflake coverage exists.
+
+**`unknown_data_domain` is not `unauthorized_data_domain`.** Both are findings
+and they look alike in a table, so every finding carries an **Attribution**
+column. `unauthorized_data_domain` means the agent touched a domain outside its
+allowlist — agent conduct, and it would block. `unknown_data_domain` means *we*
+never wrote a mapping rule for the object it touched; nobody could have been
+allowlisted for it, so it is advisory, never blocks, and is our backlog rather
+than the agent's misconduct.
+
+Cost is labelled **estimated** everywhere it appears, and the domain view states
+in prose which sources reported dollars and which had dollars derived for them.
+Snowflake reports *credits*; the demo multiplies by an assumed $3.00/credit, so
+those dollars are an assumption wearing the units of a measurement. See
+[Q9](docs/QUESTIONS_FOR_PAUL.md).
 
 ## Configuration
 
@@ -295,12 +348,13 @@ src/agent_control_plane/
   models/        vendor-neutral domain model (incl. data_domain.py)
   adapters/      one module per source; Protocol in base.py
   repositories/  persistence Protocol + SQLite implementation
-  services/      ingestion, policy engine, rules, analytics
+  services/      ingestion, policy engine, rules, analytics, dashboard queries
+  dashboard/     Streamlit console — presentation only
   bootstrap.py   composition root — the only place concrete types are wired
   constants.py   shared literals (default tenant, the `unknown` domain)
   cli.py
 config/          agent, tool + data-domain registries (governance intent)
-data/samples/    committed fixture input (sample MCP gateway log)
+data/samples/    committed fixture input (MCP gateway log, Snowflake extract)
 docs/            ARCHITECTURE.md, QUESTIONS_FOR_PAUL.md
 .github/         CI workflow
 tests/
