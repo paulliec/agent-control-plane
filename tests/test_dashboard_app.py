@@ -24,6 +24,7 @@ import pytest
 pytest.importorskip("streamlit", reason="install the 'dashboard' extra to run these")
 
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.element_tree import Button
 
 from agent_control_plane.adapters.mcp import MCPCallLogSource
 from agent_control_plane.adapters.snowflake import SnowflakeActivitySource
@@ -122,3 +123,73 @@ def test_an_empty_database_explains_how_to_seed(
     app.run()
     assert not app.exception
     assert any("seed_demo" in str(i.value) for i in app.info)
+
+
+# -- needs attention ------------------------------------------------------
+
+
+def _attention_buttons(app: AppTest) -> dict[str, Button]:
+    return {str(b.key): b for b in app.button if b.key and b.key.startswith("attention_")}
+
+
+def test_the_overview_leads_with_what_needs_attention(seeded_db: Path) -> None:
+    app = _run("Overview")
+    labels = [m.label for m in app.metric]
+    assert "Critical findings" in labels
+    assert "Unregistered agents" in labels
+    assert set(_attention_buttons(app)) == {
+        "attention_critical",
+        "attention_would_block",
+        "attention_unregistered_agent",
+        "attention_unknown_data_domain",
+    }
+
+
+@pytest.mark.parametrize(
+    ("button", "state_key", "expected"),
+    [
+        ("attention_critical", "f_sev", ["critical"]),
+        ("attention_would_block", "f_block", True),
+        ("attention_unregistered_agent", "f_policies", ["unregistered_agent"]),
+        ("attention_unknown_data_domain", "f_policies", ["unknown_data_domain"]),
+    ],
+)
+def test_an_attention_item_drills_into_its_findings(
+    seeded_db: Path, button: str, state_key: str, expected: object
+) -> None:
+    """The click must land on Findings, pre-filtered, with rows on screen.
+
+    Streamlit refuses to let a widget's key be written after that widget is
+    built, so the drill-down queues its target and `main` applies it on the
+    next run. A regression here fails silently — the button would simply do
+    nothing — which is why this asserts on the landing state, not the click.
+    """
+    app = _run("Overview")
+    _attention_buttons(app)[button].click().run()
+
+    assert not app.exception, f"{button} raised: {[e.value for e in app.exception]}"
+    assert app.session_state["page"] == "Findings"
+    assert app.session_state[state_key] == expected
+    assert len(app.dataframe[0].value) > 0, f"{button} landed on an empty table"
+
+
+def test_a_second_drilldown_replaces_the_first(seeded_db: Path) -> None:
+    """Filters must not accumulate across clicks, or the second drill-down
+    silently shows the intersection of both."""
+    app = _run("Overview")
+    _attention_buttons(app)["attention_would_block"].click().run()
+    app.sidebar.radio[0].set_value("Overview").run()
+    _attention_buttons(app)["attention_critical"].click().run()
+
+    assert not app.exception
+    assert app.session_state["f_sev"] == ["critical"]
+    assert app.session_state["f_block"] is False
+
+
+def test_the_source_chart_separates_generated_from_integration(seeded_db: Path) -> None:
+    """The demo scenario must not set the scale the real integrations are read on."""
+    app = _run("Overview")
+    captions = " ".join(str(c.value) for c in app.caption)
+    assert "Generated demo scenario, on its own scale" in captions
+    assert "mcp (10)" in captions and "snowflake (9)" in captions
+    assert "nothing is excluded" in captions

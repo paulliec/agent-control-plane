@@ -14,7 +14,14 @@ from agent_control_plane.dashboard import presenters as fmt
 from agent_control_plane.models.enums import ActionType, EventType, Platform, Severity, Status
 from agent_control_plane.models.event import build_chain
 from agent_control_plane.models.policy import PolicyResult
-from agent_control_plane.services.dashboard import CostProvenance, DomainActivity, Finding
+from agent_control_plane.services.dashboard import (
+    AttentionItem,
+    CostProvenance,
+    DomainActivity,
+    Finding,
+    FindingFilter,
+    SourceActivity,
+)
 from tests.conftest import make_event, make_result
 
 
@@ -311,3 +318,119 @@ def test_run_rows_separate_source_from_platform() -> None:
 def test_status_uses_the_event_status_verbatim() -> None:
     event = make_event(status=Status.DENIED)
     assert fmt.trace_rows(build_chain("r", [event]))[0]["Status"] == "denied"
+
+
+# -- attention and drill-down ---------------------------------------------
+
+
+def _item(key: str = "critical", **kwargs: object) -> AttentionItem:
+    defaults: dict[str, object] = {
+        "key": key,
+        "count": 4,
+        "label": "critical findings",
+        "detail": "why it matters",
+        "criteria": FindingFilter(severities=frozenset({Severity.CRITICAL})),
+    }
+    defaults.update(kwargs)
+    return AttentionItem(**defaults)  # type: ignore[arg-type]
+
+
+def test_the_attention_line_leads_with_the_count() -> None:
+    assert fmt.attention_line(_item()) == "4 critical findings"
+
+
+def test_large_counts_are_thousands_separated() -> None:
+    assert fmt.attention_line(_item(count=1234)) == "1,234 critical findings"
+
+
+def test_drilldown_targets_the_findings_page() -> None:
+    state = fmt.drilldown_state(_item())
+    assert state[fmt.PAGE_KEY] == fmt.FINDINGS_PAGE
+    assert state[fmt.FINDING_WIDGET_KEYS["severities"]] == ["critical"]
+
+
+def test_drilldown_clears_the_filters_it_does_not_set() -> None:
+    """Drilling into 'critical' after 'would block' must show critical
+    findings, not the intersection. Every key is written, empties included."""
+    state = fmt.drilldown_state(_item())
+
+    assert state[fmt.FINDING_WIDGET_KEYS["would_block"]] is False
+    assert state[fmt.FINDING_WIDGET_KEYS["policies"]] == []
+    assert state[fmt.FINDING_WIDGET_KEYS["sources"]] == []
+    assert state[fmt.FINDING_WIDGET_KEYS["agents"]] == []
+    assert state[fmt.FINDING_WIDGET_KEYS["data_domains"]] == []
+    assert set(fmt.FINDING_WIDGET_KEYS.values()) <= set(state)
+
+
+def test_drilldown_carries_a_would_block_filter() -> None:
+    state = fmt.drilldown_state(_item("would_block", criteria=FindingFilter(would_block_only=True)))
+    assert state[fmt.FINDING_WIDGET_KEYS["would_block"]] is True
+    assert state[fmt.FINDING_WIDGET_KEYS["severities"]] == []
+
+
+def test_drilldown_carries_a_rule_filter() -> None:
+    criteria = FindingFilter(policies=frozenset({"unregistered_agent"}))
+    state = fmt.drilldown_state(_item("unregistered_agent", criteria=criteria))
+    assert state[fmt.FINDING_WIDGET_KEYS["policies"]] == ["unregistered_agent"]
+
+
+def test_drilldown_values_are_deterministic() -> None:
+    """Session state feeds multiselect widgets; unstable ordering would make
+    the same click render differently between runs."""
+    criteria = FindingFilter(policies=frozenset({"b_rule", "a_rule"}))
+    state = fmt.drilldown_state(_item("x", criteria=criteria))
+    assert state[fmt.FINDING_WIDGET_KEYS["policies"]] == ["a_rule", "b_rule"]
+
+
+def test_the_pending_key_is_not_a_widget_key() -> None:
+    """It exists precisely because Streamlit refuses writes to widget keys
+    after instantiation; colliding with one would defeat the mechanism."""
+    assert fmt.PENDING_KEY not in set(fmt.FINDING_WIDGET_KEYS.values())
+    assert fmt.PENDING_KEY != fmt.PAGE_KEY
+
+
+# -- source mix -----------------------------------------------------------
+
+
+def _source(name: str, count: int, *, generated: bool = False) -> SourceActivity:
+    return SourceActivity(source=name, event_count=count, run_count=1, is_generated=generated)
+
+
+def test_source_split_charts_generated_activity_separately() -> None:
+    """143 generated events on the same axis as 9 real ones makes the real
+    integration look like noise. Same numbers, two scales."""
+    rows = [
+        _source("synthetic", 143, generated=True),
+        _source("mcp", 10),
+        _source("snowflake", 9),
+    ]
+    integrations, generated = fmt.source_split(rows)
+
+    assert integrations == {"mcp": 10, "snowflake": 9}
+    assert generated == {"synthetic": 143}
+
+
+def test_source_split_discards_nothing() -> None:
+    rows = [_source("synthetic", 143, generated=True), _source("mcp", 10)]
+    integrations, generated = fmt.source_split(rows)
+    assert sum(integrations.values()) + sum(generated.values()) == 153
+
+
+def test_the_mix_note_says_the_scenario_is_authored() -> None:
+    note = fmt.source_mix_note([_source("synthetic", 143, generated=True), _source("snowflake", 9)])
+    assert "snowflake (9)" in note
+    assert "synthetic (143)" in note
+    assert "not captured from a running system" in note
+    assert "152 events are counted in every metric" in note
+    assert "nothing is excluded" in note
+
+
+def test_the_mix_note_handles_integrations_only() -> None:
+    note = fmt.source_mix_note([_source("mcp", 10)])
+    assert "Integration extracts: mcp (10)" in note
+    assert "Generated demo scenario" not in note
+
+
+def test_the_mix_note_survives_no_activity() -> None:
+    assert fmt.source_mix_note([]) == "No ingested activity."
+    assert fmt.source_split([]) == ({}, {})

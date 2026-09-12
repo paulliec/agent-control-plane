@@ -97,34 +97,12 @@ def page_overview(console: DashboardService) -> None:
             ("Events", f"{overview.total_events:,}", "Normalized AgentEvents across all sources"),
             ("Runs", f"{overview.total_runs:,}", "Distinct execution chains"),
             ("Agents", f"{overview.unique_agents:,}", None),
+            ("Tool calls", f"{overview.total_tool_calls:,}", None),
             (
                 "Findings",
                 f"{overview.violation_count:,}",
                 "Policy violations. Passing results are recorded too, but are not findings.",
             ),
-            (
-                "Would block",
-                f"{overview.would_block_count:,}",
-                "Findings an enforcement gateway would have stopped. "
-                "Nothing was blocked — this system observes only.",
-            ),
-        ]
-    )
-    _metric_row(
-        [
-            ("Critical", f"{overview.critical_violations:,}", None),
-            (
-                "Unregistered agents",
-                f"{overview.unregistered_agents:,}",
-                "Agents seen in events but absent from config/agents.yaml",
-            ),
-            (
-                "Unclassified events",
-                f"{overview.unknown_domain_events:,}",
-                "Touched an object no mapping rule classifies. A configuration "
-                "gap of ours, not agent misconduct.",
-            ),
-            ("Tool calls", f"{overview.total_tool_calls:,}", None),
             (
                 "Cost (est.)",
                 fmt.format_usd(overview.total_cost_usd),
@@ -133,12 +111,20 @@ def page_overview(console: DashboardService) -> None:
         ]
     )
 
+    _attention_section(console)
+
     st.divider()
     left, right = st.columns(2)
 
     with left:
         st.caption("Events by source — which integration reported the activity")
-        st.bar_chart(console.analytics.events_by_source(), horizontal=True)
+        integrations, generated = fmt.source_split(console.source_activity())
+        if integrations:
+            st.bar_chart(integrations, horizontal=True)
+        if generated:
+            st.caption("Generated demo scenario, on its own scale")
+            st.bar_chart(generated, horizontal=True)
+        st.caption(fmt.source_mix_note(console.source_activity()))
         st.caption(
             "Every source normalizes into the same `AgentEvent` and is governed "
             "by the same rules. There is one control plane, not one per vendor."
@@ -165,6 +151,39 @@ def page_overview(console: DashboardService) -> None:
             "Recorded intent only. `enforced` is rejected by the model today, so "
             "an audit trail can never claim something was blocked when it was not."
         )
+
+
+def _attention_section(console: DashboardService) -> None:
+    """Counts worth looking at, each a button onto the evidence.
+
+    Drill-down is the smallest thing that works: write the Findings page's own
+    widget keys into session state, then rerun. Streamlit initialises a widget
+    from session state when the key is already set, so the Findings page builds
+    itself pre-filtered with no routing layer and no second filter code path —
+    the filter comes from `AttentionItem.criteria`, which is the same
+    `FindingFilter` the page would have constructed by hand.
+    """
+    items = console.attention()
+    with st.container(border=True):
+        st.markdown("**Needs attention**")
+        if not items:
+            st.caption(
+                "Nothing outstanding: no critical findings, no would-block "
+                "findings, every agent registered, every object classified."
+            )
+            return
+
+        for column, item in zip(st.columns(len(items)), items, strict=True):
+            with column:
+                st.metric(item.label.capitalize(), f"{item.count:,}", help=item.detail)
+                if st.button(
+                    "View findings",
+                    key=f"attention_{item.key}",
+                    width="stretch",
+                ):
+                    # Queued, not applied: see `presenters.PENDING_KEY`.
+                    st.session_state[fmt.PENDING_KEY] = fmt.drilldown_state(item)
+                    st.rerun()
 
 
 def page_runs(console: DashboardService) -> None:
@@ -423,8 +442,23 @@ def page_domains(console: DashboardService) -> None:
 # -- entry point ----------------------------------------------------------
 
 
+def _apply_pending_drilldown() -> None:
+    """Serve a queued drill-down before a single widget is built this run.
+
+    Streamlit initialises a widget from session state when its key is already
+    set, so writing the Findings page's own filter keys here is enough to make
+    it render pre-filtered — no routing layer, and no second copy of the filter
+    logic. It must happen before the nav radio exists, hence first thing in
+    `main`. See `presenters.PENDING_KEY`.
+    """
+    pending = st.session_state.pop(fmt.PENDING_KEY, None)
+    if pending:
+        st.session_state.update(pending)
+
+
 def main() -> None:
     st.set_page_config(page_title="Agent Control Plane", layout="wide")
+    _apply_pending_drilldown()
     settings = load_settings()
 
     st.sidebar.title("Agent Control Plane")

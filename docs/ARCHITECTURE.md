@@ -587,7 +587,7 @@ tenant, fixed at construction. Switching tenants in the sidebar rebuilds the
 services rather than filtering a shared result set, so the console cannot become
 the place tenant isolation is first bypassed.
 
-Three presentation obligations the console owes the data:
+Four presentation obligations the console owes the data:
 
 1. **Source ≠ platform.** Both are charted. Conflating "which integration told
    us" with "where the work ran" would overstate real Snowflake coverage,
@@ -595,11 +595,25 @@ Three presentation obligations the console owes the data:
 2. **Configuration gaps are not misconduct.** `unknown_data_domain` and
    `unregistered_agent` are about knowledge *we* lack; every finding row carries
    an Attribution column so they never read as a scope breach.
-3. **Derived cost is labelled.** Snowflake reports credits, and the dollars are
+3. **A generated scenario is not an integration.** `source_activity` flags
+   which adapters replay an authored scenario rather than an extract of real
+   telemetry, so the Overview can chart them on separate axes. 143 synthetic
+   events beside 9 Snowflake ones is a scale artefact, not a coverage claim.
+   Nothing is excluded from any total; only the chart axis changes.
+4. **Derived cost is labelled.** Snowflake reports credits, and the dollars are
    credits × a caller-supplied rate. `CostProvenance` names which sources
    reported cost, which had it derived, and how many events carry none, so a
    total never implies more measurement than exists. See Q9 — the model records
    the number, not the rate's origin, so the console names the adapter.
+
+Drill-down from the Overview's attention panel is the one piece of navigation
+state. Streamlit rejects a write to a widget's key once that widget has been
+instantiated in the current run, and the attention buttons render long after
+the nav radio, so a click stores its target under a non-widget key
+(`presenters.PENDING_KEY`) and `main` applies it at the top of the next run —
+before any widget exists. That is the whole mechanism: no router, and no
+duplicate filter logic, because the queued state is derived from the
+`FindingFilter` the attention item already carries.
 
 `app.py` deliberately does not cache the `ControlPlane` with
 `st.cache_resource`: Streamlit reruns on a ScriptRunner thread pool and a

@@ -34,6 +34,14 @@ from agent_control_plane.services.analytics import AnalyticsService, RunSummary
 # severity check because severity is about impact, not about who is at fault.
 CONFIGURATION_GAP_RULES = frozenset({"unknown_data_domain", "unregistered_agent"})
 
+# Adapters that replay a *generated* scenario rather than an extract of real
+# telemetry. Presentation only: these events are normal AgentEvents, counted in
+# every total and governed by the same rules. The distinction exists because a
+# generated scenario can be any size we like, so letting its volume set the
+# scale of a source chart would misrepresent how much real integration
+# coverage exists. See `source_activity`.
+GENERATED_SOURCES = frozenset({"synthetic"})
+
 
 @dataclass(frozen=True, slots=True)
 class Finding:
@@ -157,6 +165,42 @@ class DomainActivity:
     @property
     def is_classified(self) -> bool:
         return self.domain != UNKNOWN_DATA_DOMAIN
+
+
+@dataclass(frozen=True, slots=True)
+class SourceActivity:
+    """One ingesting adapter's contribution.
+
+    `is_generated` separates a demo scenario we authored from an extract of a
+    real integration's telemetry. Both are fixture-backed today; only one could
+    be made arbitrarily large to flatter a chart.
+    """
+
+    source: str
+    event_count: int
+    run_count: int
+    is_generated: bool
+
+    @property
+    def kind(self) -> str:
+        return "generated demo scenario" if self.is_generated else "integration extract"
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionItem:
+    """One governance signal worth a reviewer's attention, plus the query that
+    shows the evidence behind it.
+
+    The filter travels with the item so the console never re-derives "what does
+    'critical findings' mean" in a click handler — it hands the same
+    `FindingFilter` the Findings page would have built.
+    """
+
+    key: str
+    count: int
+    label: str
+    detail: str
+    criteria: FindingFilter
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +387,93 @@ class DashboardService:
             sources_without_cost=tuple(sorted(without_cost)),
             derived_sources=tuple(sorted(with_cost & _DERIVED_COST_SOURCES)),
         )
+
+    # -- overview ---------------------------------------------------------
+
+    def source_activity(self) -> list[SourceActivity]:
+        """Per-adapter contribution, busiest first.
+
+        Nothing is excluded or rescaled here. The `is_generated` flag lets the
+        console chart the generated scenario on its own axis so a handful of
+        real integration events stay legible next to it.
+        """
+        by_source: dict[str, list[AgentEvent]] = {}
+        for event in self.events():
+            by_source.setdefault(event.source_adapter, []).append(event)
+
+        rows = [
+            SourceActivity(
+                source=source,
+                event_count=len(events),
+                run_count=len({e.correlation_id for e in events}),
+                is_generated=source in GENERATED_SOURCES,
+            )
+            for source, events in by_source.items()
+        ]
+        rows.sort(key=lambda r: (-r.event_count, r.source))
+        return rows
+
+    def attention(self) -> list[AttentionItem]:
+        """The governance signals a reviewer should look at first.
+
+        Counts only, drawn from findings and events that already exist — no new
+        rule, no score, no weighting. An item with a count of zero is dropped
+        rather than rendered as a reassuring zero, so the section is empty when
+        there is genuinely nothing to see.
+        """
+        violations = [r for r in self.policy_results() if r.violated]
+        rules_fired = {r.policy_name for r in violations}
+        shadow_agents = {
+            r.agent_id for r in violations if r.policy_name == "unregistered_agent" and r.agent_id
+        }
+        # Headline the number of unclassified *events* — that is the size of the
+        # gap — but only when the rule actually fired, because the item drills
+        # into its findings and there would be nothing to show otherwise. The
+        # two can disagree: the rule stands down when no vocabulary is
+        # configured at all. The domains view reports the events either way.
+        unclassified = (
+            sum(1 for e in self.events() if e.data_domain == UNKNOWN_DATA_DOMAIN)
+            if "unknown_data_domain" in rules_fired
+            else 0
+        )
+
+        candidates = [
+            AttentionItem(
+                key="critical",
+                count=sum(1 for r in violations if r.severity is Severity.CRITICAL),
+                label="critical findings",
+                detail="The highest-severity policy violations recorded.",
+                criteria=FindingFilter(severities=frozenset({Severity.CRITICAL})),
+            ),
+            AttentionItem(
+                key="would_block",
+                count=sum(1 for r in violations if r.would_block),
+                label="findings would have been blocked",
+                detail=(
+                    "What switching enforcement on would have stopped. "
+                    "Nothing was blocked — this system observes only."
+                ),
+                criteria=FindingFilter(would_block_only=True),
+            ),
+            AttentionItem(
+                key="unregistered_agent",
+                count=len(shadow_agents),
+                label="unregistered agents",
+                detail="Active in the data but absent from config/agents.yaml.",
+                criteria=FindingFilter(policies=frozenset({"unregistered_agent"})),
+            ),
+            AttentionItem(
+                key="unknown_data_domain",
+                count=unclassified,
+                label="unclassified events",
+                detail=(
+                    "Touched objects no mapping rule classifies. A gap in our "
+                    "configuration, not agent misconduct — these never block."
+                ),
+                criteria=FindingFilter(policies=frozenset({"unknown_data_domain"})),
+            ),
+        ]
+        return [item for item in candidates if item.count]
 
     # -- filter widgets ---------------------------------------------------
 

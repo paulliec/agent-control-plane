@@ -94,6 +94,117 @@ def test_every_query_survives_an_empty_tenant(empty_console: DashboardService) -
     assert provenance.coverage == 0.0, "no events must not divide by zero"
 
 
+# -- needs attention ------------------------------------------------------
+
+
+def test_attention_counts_match_the_underlying_findings(console: DashboardService) -> None:
+    """Every attention count must be reproducible by running its own filter.
+
+    This is the property that keeps the Overview honest: the headline number
+    and the table you land on after clicking it come from the same query.
+    """
+    items = {i.key: i for i in console.attention()}
+    assert set(items) == {
+        "critical",
+        "would_block",
+        "unregistered_agent",
+        "unknown_data_domain",
+    }
+
+    for key in ("critical", "would_block", "unregistered_agent"):
+        item = items[key]
+        assert item.count == len(console.findings(item.criteria)), key
+
+
+def test_attention_drops_items_with_nothing_to_show(console: DashboardService) -> None:
+    """A count of zero is not a governance signal; it is noise."""
+    assert all(item.count > 0 for item in console.attention())
+
+
+def test_attention_is_empty_when_nothing_is_wrong(empty_console: DashboardService) -> None:
+    assert empty_console.attention() == []
+
+
+def test_attention_criteria_are_real_finding_filters(console: DashboardService) -> None:
+    """The item carries the query, so the UI never re-derives what an item means."""
+    items = {i.key: i for i in console.attention()}
+
+    critical = console.findings(items["critical"].criteria)
+    assert critical and all(f.severity is Severity.CRITICAL for f in critical)
+
+    blocking = console.findings(items["would_block"].criteria)
+    assert blocking and all(f.would_block for f in blocking)
+
+    shadow = console.findings(items["unregistered_agent"].criteria)
+    assert shadow and all(f.policy_name == "unregistered_agent" for f in shadow)
+
+
+def test_unclassified_attention_counts_events_not_findings(console: DashboardService) -> None:
+    """The gap's size is how many events we could not classify.
+
+    Findings group by subject, so counting them would understate it.
+    """
+    item = next(i for i in console.attention() if i.key == "unknown_data_domain")
+    events = sum(1 for e in console.events() if e.data_domain == UNKNOWN_DATA_DOMAIN)
+    assert item.count == events
+    assert console.findings(item.criteria), "the item must have evidence to drill into"
+
+
+def test_unclassified_attention_stays_quiet_without_the_rule(
+    console: DashboardService,
+) -> None:
+    """The rule stands down when no vocabulary is configured, leaving
+    unclassified events but no finding. The item must not offer a click that
+    dead-ends on an empty table — while every other item is unaffected."""
+    console.policy_results()  # prime the cache so the edit below sticks
+    assert console._results is not None
+    console._results = [r for r in console._results if r.policy_name != "unknown_data_domain"]
+
+    keys = [i.key for i in console.attention()]
+    assert "unknown_data_domain" not in keys
+    assert {"critical", "would_block", "unregistered_agent"} <= set(keys)
+    assert sum(1 for e in console.events() if e.data_domain == UNKNOWN_DATA_DOMAIN) > 0
+
+
+def test_attention_never_invents_a_score(console: DashboardService) -> None:
+    """Counts of things that exist, nothing weighted or synthesised."""
+    for item in console.attention():
+        assert isinstance(item.count, int)
+        assert item.label and item.detail
+
+
+# -- source mix -----------------------------------------------------------
+
+
+def test_source_activity_separates_generated_from_integration(
+    console: DashboardService,
+) -> None:
+    rows = {r.source: r for r in console.source_activity()}
+    assert set(rows) == {"synthetic", "mcp", "snowflake"}
+
+    assert rows["synthetic"].is_generated
+    assert not rows["mcp"].is_generated
+    assert not rows["snowflake"].is_generated
+    assert rows["mcp"].kind == "integration extract"
+    assert rows["synthetic"].kind == "generated demo scenario"
+
+
+def test_source_activity_discards_nothing(console: DashboardService) -> None:
+    """Presentation may re-scale the chart; it must never drop events."""
+    rows = console.source_activity()
+    assert sum(r.event_count for r in rows) == len(console.events())
+    assert sum(r.run_count for r in rows) >= len(console.runs())
+
+
+def test_source_activity_is_busiest_first(console: DashboardService) -> None:
+    counts = [r.event_count for r in console.source_activity()]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_source_activity_survives_an_empty_tenant(empty_console: DashboardService) -> None:
+    assert empty_console.source_activity() == []
+
+
 # -- the product story: three sources, one core ---------------------------
 
 

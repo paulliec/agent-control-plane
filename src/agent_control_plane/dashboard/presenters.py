@@ -14,7 +14,37 @@ from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
 from agent_control_plane.models.enums import Severity
 from agent_control_plane.models.event import AgentEvent, ExecutionChain
 from agent_control_plane.services.analytics import RunSummary
-from agent_control_plane.services.dashboard import CostProvenance, DomainActivity, Finding
+from agent_control_plane.services.dashboard import (
+    AttentionItem,
+    CostProvenance,
+    DomainActivity,
+    Finding,
+    SourceActivity,
+)
+
+# Navigation and filter-widget keys, named once here rather than spelled inline
+# in `app.py`. Drill-down works by writing a widget's key into session state
+# before the widget is built, so a typo would silently do nothing — which is
+# exactly the failure a shared constant prevents.
+PAGE_KEY = "page"
+FINDINGS_PAGE = "Findings"
+
+# Where a queued drill-down parks between the click and the rerun that serves
+# it. Deliberately *not* a widget key: Streamlit refuses to let you write a
+# widget's key once that widget has been instantiated in the current run, and
+# the attention buttons are rendered long after the nav radio. So the click
+# stores its intent here and `app.main` applies it on the next run, before any
+# widget exists. This is the whole navigation mechanism — no router.
+PENDING_KEY = "_pending_drilldown"
+
+FINDING_WIDGET_KEYS = {
+    "sources": "f_sources",
+    "agents": "f_agents",
+    "policies": "f_policies",
+    "data_domains": "f_domains",
+    "severities": "f_sev",
+    "would_block": "f_block",
+}
 
 # Text markers rather than colour: this is a governance console, and severity
 # must survive being pasted into a ticket or read by someone colour-blind.
@@ -201,6 +231,71 @@ def cost_caveat(provenance: CostProvenance) -> str:
             "carry no cost figure and contribute nothing to these totals."
         )
     return " ".join(parts) if parts else "All ingested events carry source-reported cost."
+
+
+def attention_line(item: AttentionItem) -> str:
+    """`4 critical findings` — the count leads, because the count is the point."""
+    return f"{item.count:,} {item.label}"
+
+
+def drilldown_state(item: AttentionItem) -> dict[str, Any]:
+    """Session-state assignments that reproduce an attention item on the
+    Findings page.
+
+    Returned rather than applied so the mapping is testable without a Streamlit
+    runtime. Every filter key is written, including the empty ones: drilling
+    into "critical" after drilling into "would block" must show critical
+    findings, not the intersection of the two.
+    """
+    criteria = item.criteria
+    return {
+        PAGE_KEY: FINDINGS_PAGE,
+        FINDING_WIDGET_KEYS["sources"]: sorted(criteria.sources),
+        FINDING_WIDGET_KEYS["agents"]: sorted(criteria.agents),
+        FINDING_WIDGET_KEYS["policies"]: sorted(criteria.policies),
+        FINDING_WIDGET_KEYS["data_domains"]: sorted(criteria.data_domains),
+        FINDING_WIDGET_KEYS["severities"]: sorted(s.value for s in criteria.severities),
+        FINDING_WIDGET_KEYS["would_block"]: criteria.would_block_only,
+    }
+
+
+def source_split(rows: list[SourceActivity]) -> tuple[dict[str, int], dict[str, int]]:
+    """Integration extracts and generated demo activity, charted separately.
+
+    Same numbers, two axes. A generated scenario can be any size we choose, so
+    plotting it beside the real integrations makes ten genuine Snowflake events
+    look like nothing. Splitting keeps both readable without hiding either.
+    """
+    integrations = {r.source: r.event_count for r in rows if not r.is_generated}
+    generated = {r.source: r.event_count for r in rows if r.is_generated}
+    return integrations, generated
+
+
+def source_mix_note(rows: list[SourceActivity]) -> str:
+    """States the split in words, so the two charts cannot be misread as a
+    claim that the demo scenario is an integration."""
+    if not rows:
+        return "No ingested activity."
+    integrations = [r for r in rows if not r.is_generated]
+    generated = [r for r in rows if r.is_generated]
+    total = sum(r.event_count for r in rows)
+
+    parts: list[str] = []
+    if integrations:
+        named = ", ".join(f"{r.source} ({r.event_count:,})" for r in integrations)
+        parts.append(f"Integration extracts: {named}.")
+    if generated:
+        named = ", ".join(f"{r.source} ({r.event_count:,})" for r in generated)
+        parts.append(
+            f"Generated demo scenario: {named} — authored for this demo, not "
+            "captured from a running system. Charted separately because its "
+            "size is a choice we made, not evidence of coverage."
+        )
+    parts.append(
+        f"All {total:,} events are counted in every metric above and governed "
+        "by the same rules; nothing is excluded."
+    )
+    return " ".join(parts)
 
 
 def domain_gap_note(rows: list[DomainActivity]) -> str | None:

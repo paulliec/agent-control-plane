@@ -212,18 +212,43 @@ Five views, all scoped to the tenant selected in the sidebar:
 
 | View | Answers |
 |---|---|
-| **Overview** | How much activity, from which sources and platforms, how many findings, what enforcement *would* have stopped, what it cost |
+| **Overview** | How much activity, what needs attention, from which sources and platforms, what enforcement *would* have stopped, what it cost |
 | **Runs** | Browsable execution chains with source, platform, status, duration, cost, findings and max severity; filterable, drillable into a trace |
 | **Findings** | Every policy violation, filterable by source, platform, agent, rule, severity, data domain and would-block |
 | **Trace** | One execution chain as a call tree, with the findings it produced and the raw source metadata behind an expander |
 | **Data domains & cost** | Activity and spend per governance domain, including the unclassified bucket |
 
-Two things the console is deliberately careful about:
+The Overview opens with headline volume, then a **Needs attention** panel:
+critical findings, findings that would have been blocked, unregistered agents
+and unclassified events. Each is a count of something already in the data — no
+score, no weighting — and each has a button that opens the Findings view with
+that exact filter applied. Items with a count of zero are dropped rather than
+shown as a reassuring zero, so the panel is empty when there is nothing to see.
+
+Drill-down is deliberately the smallest mechanism that works. Streamlit will
+not let you write a widget's key after that widget has been built, so a click
+parks its target filter under a non-widget session-state key and the next run
+applies it before any widget exists. No router, and no second copy of the
+filter logic — the button hands over the same `FindingFilter` the Findings page
+would have constructed itself.
+
+Three things the console is deliberately careful about:
 
 **Source is not platform.** The Overview charts both. `source` is which
 integration told us (`synthetic`, `mcp`, `snowflake`); `platform` is where the
 work physically ran. The synthetic scenario emits Snowflake-platform events, so
 conflating the two would overstate how much real Snowflake coverage exists.
+
+**A generated scenario is not an integration.** The demo holds 143 synthetic
+events against 10 MCP and 9 Snowflake ones, so plotting all three on one axis
+makes the real integrations look like rounding error — a scale artefact, since
+the size of a scenario we authored is a choice rather than evidence. The
+Overview therefore charts integration extracts and the generated scenario
+separately, and states the split in words beneath. Nothing is filtered out or
+rescaled: all 162 events are counted in every metric, and the fixtures are
+untouched. Hiding synthetic behind a default-off toggle was the alternative
+considered and rejected — it would have made the Overview's totals silently
+disagree with `acp stats`.
 
 **`unknown_data_domain` is not `unauthorized_data_domain`.** Both are findings
 and they look alike in a table, so every finding carries an **Attribution**
