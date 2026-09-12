@@ -13,6 +13,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 
+from agent_control_plane.constants import UNKNOWN_DATA_DOMAIN
 from agent_control_plane.models.enums import EventType, Severity, Status
 from agent_control_plane.models.event import AgentEvent, ExecutionChain, build_chain
 from agent_control_plane.models.policy import PolicyResult
@@ -32,9 +33,15 @@ class Overview:
     failed_tool_calls: int
     violation_count: int
     critical_violations: int
+    # "What would switching enforcement on have stopped?" - answerable before
+    # switching it on, which is the point of recording decisions separately.
+    would_block_count: int
     unique_agents: int
     unique_tools: int
     unregistered_agents: int
+    # Activity we could not classify. A governance gap of ours, tracked
+    # alongside the findings rather than buried in them.
+    unknown_domain_events: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +58,25 @@ class RunSummary:
     ok: bool
     violation_count: int
     max_severity: Severity | None
+    # Where the work physically happened. One run legitimately spans several:
+    # a forecast agent queries Snowflake, calls an MCP tool and hits an HTTP API.
+    platforms: tuple[str, ...]
+    # Which adapters told us about it. A different axis from `platforms` - the
+    # synthetic adapter reports Snowflake-platform events without Snowflake
+    # having been the source.
+    sources: tuple[str, ...]
+    would_block_count: int
+    # Snowflake has no run-envelope record, so every event is a root and the
+    # chain is legitimately flat. Surfaced rather than smoothed over.
+    root_count: int
 
     @property
     def status_label(self) -> str:
         return "success" if self.ok else "failed"
+
+    @property
+    def is_multi_root(self) -> bool:
+        return self.root_count > 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +151,11 @@ class AnalyticsService:
             failed_tool_calls=sum(1 for e in tool_calls if e.status in _FAILED_STATUSES),
             violation_count=len(violations),
             critical_violations=sum(1 for v in violations if v.severity is Severity.CRITICAL),
+            would_block_count=sum(1 for v in violations if v.would_block),
             unique_agents=len({e.agent_id for e in events}),
             unique_tools=len({e.tool_name for e in tool_calls if e.tool_name}),
             unregistered_agents=len(unregistered),
+            unknown_domain_events=sum(1 for e in events if e.data_domain == UNKNOWN_DATA_DOMAIN),
         )
 
     def events_by_platform(self) -> dict[str, int]:
@@ -192,6 +216,27 @@ class AnalyticsService:
                 totals[event.data_domain] += event.estimated_cost_usd or 0.0
         ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
         return {domain: round(value, 6) for domain, value in ranked}
+
+    def events_by_source(self) -> dict[str, int]:
+        """Event counts per ingesting adapter, busiest first.
+
+        Distinct from `events_by_platform`: that answers "where did the work
+        happen", this answers "which integration told us about it". The
+        synthetic adapter emits Snowflake-platform events, so the two disagree
+        by design and conflating them would overstate real Snowflake coverage.
+        """
+        counts = Counter(e.source_adapter for e in self._events())
+        return dict(counts.most_common())
+
+    def events_by_data_domain(self) -> dict[str, int]:
+        """Event counts per domain, busiest first.
+
+        Complements `cost_by_data_domain`: not every source reports cost, so a
+        domain can be heavily used and show zero spend. Counting separately
+        keeps "how much activity" and "how much money" from being confused.
+        """
+        counts = Counter(e.data_domain for e in self._events() if e.data_domain)
+        return {domain: n for domain, n in counts.most_common()}
 
     def recent_runs(self, limit: int = 20) -> list[RunSummary]:
         violations_by_run: dict[str, list[PolicyResult]] = {}
@@ -257,6 +302,8 @@ def _chain_failed(events: list[AgentEvent]) -> bool:
 def _summarise(chain: ExecutionChain, violations: list[PolicyResult]) -> RunSummary:
     events = list(chain.events)
     roots = chain.roots
+    platforms = tuple(sorted({e.platform.value for e in events}))
+    sources = tuple(sorted({e.source_adapter for e in events}))
     initiated_by = next((r.actor_id for r in roots if r.actor_id), None)
     max_severity = (
         max((v.severity for v in violations), key=lambda s: s.rank) if violations else None
@@ -276,4 +323,8 @@ def _summarise(chain: ExecutionChain, violations: list[PolicyResult]) -> RunSumm
         ok=not _chain_failed(events),
         violation_count=len(violations),
         max_severity=max_severity,
+        platforms=platforms,
+        sources=sources,
+        would_block_count=sum(1 for v in violations if v.would_block),
+        root_count=len(roots),
     )

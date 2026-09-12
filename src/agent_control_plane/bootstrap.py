@@ -20,6 +20,7 @@ from agent_control_plane.registry import Registry, load_registry
 from agent_control_plane.repositories.base import ControlPlaneRepository
 from agent_control_plane.repositories.sqlite import SQLiteRepository
 from agent_control_plane.services.analytics import AnalyticsService
+from agent_control_plane.services.dashboard import DashboardService
 from agent_control_plane.services.ingestion import IngestionService
 from agent_control_plane.services.policy_engine import (
     PolicyContext,
@@ -48,6 +49,20 @@ class ControlPlane:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def build_dashboard(control_plane: ControlPlane) -> DashboardService:
+    """Read-side query service for the console.
+
+    Built here rather than by the UI so the console never wires up a repository
+    itself, and built on demand rather than as a `ControlPlane` field because
+    the CLI and the tests have no use for it.
+    """
+    return DashboardService(
+        repository=control_plane.repository,
+        analytics=control_plane.analytics,
+        tenant_id=control_plane.tenant_id,
+    )
 
 
 def build_control_plane(
