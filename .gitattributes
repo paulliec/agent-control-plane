@@ -7,3 +7,7 @@
 *.yml   text
 *.toml  text
 *.jsonl text
+
+# Shell scripts must stay LF even on Windows: bash rejects a CRLF shebang
+# with "bad interpreter", and scripts/verify.sh is the project's one gate.
+*.sh    text eol=lf
