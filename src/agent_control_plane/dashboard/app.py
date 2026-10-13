@@ -24,6 +24,7 @@ import streamlit as st
 from agent_control_plane.bootstrap import ControlPlane, build_control_plane, build_dashboard
 from agent_control_plane.config import Settings, load_settings
 from agent_control_plane.dashboard import presenters as fmt
+from agent_control_plane.demo import ensure_demo_data
 from agent_control_plane.models.enums import Severity
 from agent_control_plane.services.dashboard import (
     DashboardService,
@@ -33,6 +34,18 @@ from agent_control_plane.services.dashboard import (
 )
 
 PAGES = ("Overview", "Runs", "Findings", "Trace", "Data domains & cost")
+
+# What a visitor to the hosted demo is looking at. Short on purpose: the console
+# already states its caveats where the numbers are (cost provenance on the
+# domain page, would-block on the Overview), and a wall of disclaimers in the
+# sidebar would only train people to skip them.
+DEMO_NOTE = (
+    "**Demo environment — synthetic and representative telemetry.** The "
+    "synthetic scenario is generated demo data; the MCP and Snowflake records "
+    "are representative modelled telemetry read from committed fixtures. "
+    "Nothing here is connected to a live enterprise environment, and "
+    "*would block* is evaluated enforcement intent, not inline blocking."
+)
 
 
 # -- wiring ---------------------------------------------------------------
@@ -456,6 +469,25 @@ def _apply_pending_drilldown() -> None:
         st.session_state.update(pending)
 
 
+def _bootstrap_demo(settings: Settings) -> None:
+    """Make the hosted demo self-sufficient: no seed step, no credentials.
+
+    The work is `demo.ensure_demo_data`, not anything defined here — the console
+    does not own the demo scenario any more than it owns a SQL query. It is
+    called on every rerun and does real work on at most the first one, because
+    the check is a tenant-scoped `COUNT(*)` and a populated database is left
+    untouched.
+
+    Off (`ACP_DEMO_BOOTSTRAP=false`) means an empty console stays empty. That is
+    the right answer for a deployment reading real telemetry, where no events is
+    a fact worth seeing rather than a gap to paper over with synthetic rows.
+    """
+    if not settings.demo_bootstrap:
+        return
+    with st.spinner("Preparing the deterministic demo dataset…"):
+        ensure_demo_data(settings)
+
+
 def main() -> None:
     st.set_page_config(page_title="Agent Control Plane", layout="wide")
     _apply_pending_drilldown()
@@ -463,6 +495,8 @@ def main() -> None:
 
     st.sidebar.title("Agent Control Plane")
     st.sidebar.caption("Observability and governance for AI agents across platforms")
+
+    _bootstrap_demo(settings)
 
     if not Path(settings.db_path).exists():
         st.title("Agent Control Plane")
@@ -480,6 +514,8 @@ def main() -> None:
     st.sidebar.divider()
     st.sidebar.caption(f"Database: `{settings.db_path.name}`")
     st.sidebar.caption("Observe-only. Nothing here enforces or blocks.")
+    if settings.demo_bootstrap:
+        st.sidebar.caption(DEMO_NOTE)
 
     st.title("Agent Control Plane")
 

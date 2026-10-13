@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     default_max_cost_usd: float = 1.00
     default_max_tool_calls: int = 25
 
+    # Lets the console seed the deterministic demo dataset when it finds no
+    # events, so a visitor to the hosted demo gets a populated page without
+    # running a script. On by default because that is what this repo is — a
+    # credential-free demo over committed fixtures.
+    #
+    # Set ACP_DEMO_BOOTSTRAP=false for any deployment that ingests real
+    # telemetry: there an empty database means ingestion is broken, and
+    # quietly fabricating synthetic rows would hide exactly that.
+    demo_bootstrap: bool = True
+
     @property
     def agents_file(self) -> Path:
         return self.registry_dir / "agents.yaml"

@@ -115,14 +115,88 @@ def test_cost_is_labelled_as_estimated_and_partly_derived(seeded_db: Path) -> No
 def test_an_empty_database_explains_how_to_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A reviewer who launches before seeding gets instructions, not a stack trace."""
+    """With demo bootstrap off, an empty console must explain itself.
+
+    Bootstrap is off for any deployment reading real telemetry, where no events
+    means ingestion is broken. The console's job there is instructions, not a
+    stack trace — and certainly not synthetic rows invented to look healthy.
+    """
     monkeypatch.setenv("ACP_DB_PATH", str(tmp_path / "empty.db"))
     monkeypatch.setenv("ACP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ACP_DEMO_BOOTSTRAP", "false")
 
     app = AppTest.from_file(str(APP), default_timeout=120)
     app.run()
     assert not app.exception
     assert any("seed_demo" in str(i.value) for i in app.info)
+    # Bootstrap off means nothing was written, not even an empty schema.
+    assert not (tmp_path / "empty.db").exists()
+
+
+# -- public demo ----------------------------------------------------------
+
+
+def test_the_console_seeds_itself_and_renders_from_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a visitor to the hosted demo gets: an empty filesystem in, a
+    populated Overview out, with no seed step and no credentials.
+
+    Asserting on rendered metrics rather than on the database, because the
+    failure that matters is a blank page — the bootstrap succeeding while the
+    page still shows the 'go and seed it' notice would pass a DB-only check.
+    """
+    monkeypatch.setenv("ACP_DB_PATH", str(tmp_path / "fresh.db"))
+    monkeypatch.setenv("ACP_DATA_DIR", str(REPO_ROOT / "data"))
+
+    app = _run("Overview")
+
+    assert app.metric, "auto-seeded console rendered no metrics"
+    assert not any("seed_demo" in str(i.value) for i in app.info)
+    assert (tmp_path / "fresh.db").exists()
+
+
+def test_navigating_an_auto_seeded_console_does_not_reseed_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streamlit re-executes the whole script on every interaction, so the
+    bootstrap runs again on each one. Totals must not move."""
+    monkeypatch.setenv("ACP_DB_PATH", str(tmp_path / "fresh.db"))
+    monkeypatch.setenv("ACP_DATA_DIR", str(REPO_ROOT / "data"))
+
+    app = _run("Overview")
+    before = app.metric[0].value
+
+    for page in PAGES:
+        app.sidebar.radio[0].set_value(page).run()
+        assert not app.exception, f"{page} raised: {[e.value for e in app.exception]}"
+    app.sidebar.radio[0].set_value("Overview").run()
+
+    assert app.metric[0].value == before, "event total changed across reruns"
+
+
+def test_the_demo_labels_itself_as_synthetic(seeded_db: Path) -> None:
+    """A public visitor must not mistake modelled fixtures for a live feed."""
+    app = _run("Overview")
+    sidebar = " ".join(str(c.value) for c in app.sidebar.caption)
+
+    assert "Demo environment" in sidebar
+    assert "synthetic" in sidebar.lower()
+    assert "Nothing here is connected to a live enterprise environment" in sidebar
+    assert "evaluated enforcement intent" in sidebar
+
+
+def test_a_real_telemetry_deployment_shows_no_demo_label(
+    seeded_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The label describes where the data came from, so it has to disappear
+    when the data no longer comes from fixtures."""
+    monkeypatch.setenv("ACP_DEMO_BOOTSTRAP", "false")
+
+    app = _run("Overview")
+    sidebar = " ".join(str(c.value) for c in app.sidebar.caption)
+
+    assert "Demo environment" not in sidebar
 
 
 # -- needs attention ------------------------------------------------------
