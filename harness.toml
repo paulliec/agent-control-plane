@@ -1,0 +1,59 @@
+# Unattended-development harness. The code in scripts/harness/ is generic;
+# everything specific to this repo lives here, in CLAUDE.md and in docs/NEXT.md.
+# See docs/HARNESS.md.
+
+[repo]
+owner = "paulliec"          # the only login that may author or approve a task
+base_branch = "main"
+branch_prefix = "agent/"
+approved_work = "docs/NEXT.md"
+
+[labels]
+approved = "acp:approved"
+blocked = "acp:blocked"
+
+# One task per run is structural: every tool here takes exactly one contract.
+[limits]
+max_turns = 20
+repair_attempts = 2
+# Unset on purpose. Unattended runs must refuse to start until a cap has been
+# validated against real usage (docs/HARNESS.md, "Spending cap").
+max_budget_usd = 0
+
+[verify]
+command = ["bash", "scripts/verify.sh"]
+
+# Globs, matched case-insensitively against repo-relative POSIX paths. `*`
+# crosses directories. An agent never writes these, and a contract cannot
+# grant them.
+[protected]
+paths = [
+  "CLAUDE.md",
+  "harness.toml",
+  "pyproject.toml",
+  ".gitignore",
+  ".gitattributes",
+  ".git/*",
+  ".claude/*",
+  ".github/*",
+  "scripts/*",
+  "docs/NEXT.md",
+  "docs/QUESTIONS_FOR_PAUL.md",
+  "docs/HARNESS.md",
+  "docs/harness/*",
+  # governance config and fixtures decide the demo's numbers; a task that
+  # changes them is changing expected results, which needs a person
+  "config/*",
+  "data/samples/*",
+  # code pytest or Python runs before any test does; a conftest can rewrite
+  # every result into a pass (tests/test_harness_adversarial.py, G3)
+  "*conftest.py",
+  "*pytest.ini",
+  "*tox.ini",
+  "*setup.cfg",
+  "*sitecustomize.py",
+  "*usercustomize.py",
+  "*.pth",
+  ".env*",
+  ".venv/*",
+]

@@ -3,7 +3,9 @@
 Durable rules for working in this repo. Read `docs/CURRENT_STATE.md` for where
 the project is and `docs/NEXT.md` for what is approved to build. Architecture
 detail lives in `docs/ARCHITECTURE.md`; decisions and their costs in
-`docs/QUESTIONS_FOR_PAUL.md`.
+`docs/QUESTIONS_FOR_PAUL.md`. Unattended agent work goes through the harness in
+`docs/HARNESS.md`. Its protected paths (`harness.toml`) are off-limits to an
+agent.
 
 ## What ACP is
 

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "disableBypassPermissionsMode": "disable",
+    "allow": [
+      "Read(./**)",
+      "Edit(./src/**)",
+      "Edit(./tests/**)",
+      "Bash(bash scripts/verify.sh)",
+      "Bash(./scripts/verify.sh)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(.venv/bin/python -m ruff *)",
+      "Bash(.venv/bin/python -m mypy *)",
+      "Bash(.venv/Scripts/python.exe -m pytest *)",
+      "Bash(.venv/Scripts/python.exe -m ruff *)",
+      "Bash(.venv/Scripts/python.exe -m mypy *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ],
+    "deny": [
+      "Edit(./CLAUDE.md)",
+      "Edit(./harness.toml)",
+      "Edit(./pyproject.toml)",
+      "Edit(./.gitignore)",
+      "Edit(./.gitattributes)",
+      "Edit(./.claude/**)",
+      "Edit(./.github/**)",
+      "Edit(./scripts/**)",
+      "Edit(./docs/**)",
+      "Edit(./config/**)",
+      "Edit(./data/samples/**)",
+      "Edit(./**/conftest.py)",
+      "Read(./.env*)",
+      "Bash(git push *)",
+      "Bash(git push)",
+      "Bash(gh *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/harness/guard.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

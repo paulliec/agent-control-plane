@@ -16,6 +16,13 @@ decision, not a backlog ticket.
 2. **Code-review / demo documentation.** README as a reviewer's entry point, the
    harness files (`CLAUDE.md`, `CURRENT_STATE.md`, this file, `scripts/verify.sh`),
    and the safety scrub that makes the repo publishable.
+3. **Development harness, Phase 0/1.5.** Task contracts and eligibility
+   checks, implementer and read-only reviewer agents, the trusted verifier and
+   protected-path checks, unattended permission settings, the Phase 1.5
+   security fixes, and their documentation (`docs/HARNESS.md`). Branch
+   `feat/autonomous-harness` only. Not approved within this item: scheduled or
+   unattended runs, publishing branches, opening PRs, changes to CI or GitHub
+   repository settings, and any change to application logic.
 
 Tests for new deterministic behaviour are in scope. Lowering an existing gate to
 make something fit is not.
@@ -24,6 +31,8 @@ make something fit is not.
 
 Designed, discussed or obvious — none of it authorized:
 
+- Harness Phase 2+: headless runner, scheduled or hosted runs, GitHub writes
+  (labels, comments, branches, PRs)
 - Tollgate 3, in whole or in part
 - Agent discovery / inventory
 - Declared-vs-observed reconciliation
