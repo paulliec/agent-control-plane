@@ -128,6 +128,11 @@ def evaluate(
     if not scope.descends_from(root, base, tip):
         report.update(ok=False, error="candidate does not descend from the pinned base")
         return report
+    # agents can't merge (guard), and a merge's changes depend on which parent
+    # you diff against, so a candidate with one is refused rather than judged
+    if merges := scope.merge_commits(root, base, tip):
+        report.update(ok=False, error=f"candidate contains merge commits: {merges}")
+        return report
 
     sc = scope.check(scope.changed_files(root, base, tip), task.allowed_paths, cfg)
     report["scope"] = {
@@ -157,8 +162,15 @@ def evaluate(
             for c in task.criteria
         ]
 
-    # ok covers what was asked for; accepting a task needs ok with criteria_run
-    report["ok"] = sc.ok and all(r["status"] != "fail" for r in report["criteria"])
+    # ok covers what was asked for; accepting a task needs ok with criteria_run.
+    # A criteria run that never passed verify is never ok, whatever the parser
+    # let through.
+    verified = any(r["criterion"] == "verify" and r["status"] == "pass" for r in report["criteria"])
+    report["ok"] = (
+        sc.ok
+        and all(r["status"] != "fail" for r in report["criteria"])
+        and (verified or not run_criteria)
+    )
     return report
 
 

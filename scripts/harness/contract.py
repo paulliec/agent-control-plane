@@ -154,8 +154,10 @@ def parse(body: str, cfg: Config) -> Contract:
             criteria.append(parse_criterion(line))
         except ContractError as e:
             problems += e.problems
-    # the deterministic gate is not optional, whatever the contract says
-    if criteria and not any(c.kind == "verify" for c in criteria):
+    # The deterministic gate is not optional, whatever the contract says. No
+    # precondition: a field that normalises to nothing (an empty code fence)
+    # must fail here, not slip through as "no criteria to check".
+    if not any(c.kind == "verify" for c in criteria):
         problems.append("criteria must include 'verify'")
 
     if problems:

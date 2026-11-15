@@ -468,3 +468,125 @@ def test_the_reviewer_cannot_be_handed_write_tools() -> None:
     text = (REPO_ROOT / ".claude/agents/reviewer.md").read_text(encoding="utf-8")
     assert "never the implementer's summary" in text
     assert "tools: Read, Grep, Glob\n" in text
+
+
+# --- PR #1 review findings ----------------------------------------------------
+
+FENCE_ONLY = "```\n```"
+
+
+def pilot_with_criteria(criteria: str) -> str:
+    text = (REPO_ROOT / CONTRACT).read_text(encoding="utf-8")
+    head, rest = text.split("### Acceptance criteria", 1)
+    tail = rest[rest.index("### Stop conditions") :]
+    return f"{head}### Acceptance criteria\n\n{criteria}\n\n{tail}"
+
+
+def test_a_fence_only_criteria_field_is_rejected() -> None:
+    """P1: an empty code fence normalised to zero criteria and skipped the verify rule."""
+    with pytest.raises(contract.ContractError, match="verify"):
+        contract.parse(pilot_with_criteria(FENCE_ONLY), config.load())
+
+
+def test_a_fence_only_contract_at_the_base_is_refused_by_the_gate(repo: Path) -> None:
+    # the approved (base) contract itself is the malformed one
+    git(repo, "checkout", "-q", "main")
+    (repo / CONTRACT).write_text(pilot_with_criteria(FENCE_ONLY), encoding="utf-8")
+    git(repo, "commit", "-qam", "approved contract, fence-only criteria")
+    git(repo, "checkout", "-q", "agent/1-demo-counts")
+    git(repo, "merge", "-q", "--ff-only", "main")
+    (repo / "tests/test_demo_counts.py").write_text("def test_x(): pass\n")
+    commit_all(repo)
+    base = trusted(repo)
+    with pytest.raises(contract.ContractError, match="verify"):
+        gate.evaluate(repo, base, "agent/1-demo-counts", CONTRACT, run_criteria=True)
+
+
+def test_the_gate_never_accepts_a_run_without_a_passing_verify(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defence in depth: even a contract that slipped past the parser can't pass."""
+    (repo / "tests/test_demo_counts.py").write_text("def test_x(): pass\n")
+    commit_all(repo)
+    base = trusted(repo)
+    real_parse = contract.parse
+
+    def no_criteria(body: str, cfg: config.Config) -> contract.Contract:
+        c = real_parse(body, cfg)
+        return contract.Contract(
+            c.goal, c.approved_item, c.allowed_paths, (), c.stop_conditions, c.out_of_scope
+        )
+
+    monkeypatch.setattr(contract, "parse", no_criteria)
+    monkeypatch.setattr(gate, "sandboxed", lambda: True)
+    report = gate.evaluate(repo, base, "agent/1-demo-counts", CONTRACT, run_criteria=True)
+    assert report["ok"] is False
+
+
+def test_a_protected_edit_reverted_later_is_still_caught(repo: Path) -> None:
+    """P2: the endpoint diff is clean, but the history carries the protected edit."""
+    (repo / "CLAUDE.md").write_text("weakened\n")
+    commit_all(repo, "edit protected")
+    (repo / "CLAUDE.md").write_text("rules\n")
+    (repo / "tests/test_demo_counts.py").write_text("def test_x(): pass\n")
+    commit_all(repo, "restore and add test")
+    assert "CLAUDE.md" in scoped(repo).protected
+    base = trusted(repo)
+    report = gate.evaluate(repo, base, "agent/1-demo-counts", CONTRACT)
+    assert report["ok"] is False
+    assert "CLAUDE.md" in report["scope"]["protected"]
+
+
+def test_an_out_of_scope_file_added_then_deleted_is_still_caught(repo: Path) -> None:
+    (repo / "notes.txt").write_text("exfil\n")
+    (repo / "tests/test_demo_counts.py").write_text("def test_x(): pass\n")
+    commit_all(repo, "add")
+    git(repo, "rm", "-q", "notes.txt")
+    git(repo, "commit", "-qm", "delete")
+    assert "notes.txt" in scoped(repo).outside_contract
+
+
+def test_a_candidate_containing_a_merge_commit_is_rejected(repo: Path) -> None:
+    """Merge parents would need per-parent diffs; agents can't merge, so refuse them."""
+    git(repo, "checkout", "-qb", "side", "main")
+    (repo / "CLAUDE.md").write_text("from the side\n")
+    commit_all(repo, "side")
+    git(repo, "checkout", "-q", "agent/1-demo-counts")
+    (repo / "tests/test_demo_counts.py").write_text("def test_x(): pass\n")
+    commit_all(repo)
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge", "side")
+    base = trusted(repo)
+    report = gate.evaluate(repo, base, "agent/1-demo-counts", CONTRACT)
+    assert report["ok"] is False
+    assert "merge" in report["error"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Grep", {"pattern": ".*", "path": ".env.production"}),
+        ("Grep", {"pattern": ".*", "path": "config/.env.local"}),
+        ("Grep", {"pattern": ".*", "glob": ".env*"}),
+        ("Grep", {"pattern": ".*", "glob": "**/.env.*"}),
+        ("Grep", {"pattern": ".*", "path": "config", "glob": "*.env"}),
+        ("Glob", {"pattern": ".env*"}),
+        ("Glob", {"pattern": "**/.env.*"}),
+        ("Glob", {"pattern": "config/.env.local"}),
+        ("Glob", {"pattern": "*", "path": "config/.env.d"}),
+    ],
+)
+def test_searches_cannot_target_secret_files(tool: str, tool_input: dict[str, Any]) -> None:
+    """P2: the search branch returned before the Read branch's .env check."""
+    assert decide(tool, **tool_input) is not None
+
+
+def test_ordinary_searches_still_work_next_to_the_secret_rule() -> None:
+    assert decide("Grep", pattern="environment", path="src", glob="*.py") is None
+    assert decide("Glob", pattern="src/**/environment*.py") is None
+
+
+def test_secret_files_are_denied_at_any_depth_in_permissions() -> None:
+    s = json.loads((REPO_ROOT / ".claude/harness/settings.json").read_text(encoding="utf-8"))
+    assert {"Read(./.env*)", "Read(./**/.env*)", "Read(./**/*.env)"} <= set(
+        s["permissions"]["deny"]
+    )

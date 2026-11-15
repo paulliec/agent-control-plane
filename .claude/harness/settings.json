@@ -38,6 +38,8 @@
       "Edit(./data/samples/**)",
       "Edit(./**/conftest.py)",
       "Read(./.env*)",
+      "Read(./**/.env*)",
+      "Read(./**/*.env)",
       "Bash(git push *)",
       "Bash(git push)",
       "Bash(gh *)",

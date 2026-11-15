@@ -13,6 +13,7 @@ blocks the call.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import shlex
@@ -51,6 +52,29 @@ SHELL_RULES: list[tuple[re.Pattern[str], str]] = [
         (r"\.env\b", "secrets files are off limits"),
     ]
 ]
+
+
+# Representative secret file names. A path or glob that could name one of
+# these is refused for every read-family tool, not only Read.
+SECRET_NAMES = (".env", ".env.local", ".env.production", "prod.env")
+
+
+def _targets_secret(spec: str) -> bool:
+    """True if any segment of a path or glob names or matches a secrets file.
+
+    Pure-wildcard segments (`*`, `**`, `*.*`) are let through: refusing them
+    would refuse every broad search. Whether those can surface a dotfile is
+    the search tool's own behaviour: hidden files are skipped, gitignored ones
+    are not. Checked live with a canary and recorded in docs/HARNESS.md.
+    """
+    for seg in re.split(r"[\\/]", spec.lower()):
+        if not any(ch.isalnum() for ch in seg):
+            continue
+        if ".env" in seg or seg.endswith("env"):
+            return True
+        if any(fnmatch.fnmatchcase(name, seg) for name in SECRET_NAMES):
+            return True
+    return False
 
 
 def _rel(path_str: str, root: Path) -> str | None:
@@ -130,6 +154,10 @@ def decide(
             return f"{tool}: {path!r} is outside the repository"
         # a Glob pattern can point elsewhere on its own, whatever `path` says
         pattern = str(tool_input.get("pattern", ""))
+        # path, Glob pattern and Grep's file filter can each aim at a secret
+        for spec in (path, pattern if tool == "Glob" else "", str(tool_input.get("glob") or "")):
+            if spec and _targets_secret(spec):
+                return f"{tool}: {spec!r} targets a secrets file"
         if tool == "Glob" and (
             Path(pattern).is_absolute()
             # drive paths, whichever OS the guard happens to run on
@@ -146,9 +174,7 @@ def decide(
         if rel is None:
             return f"{tool}: {target!r} is outside the repository"
         if tool == "Read":
-            return (
-                f"Read: {rel} is a secrets file" if rel.split("/")[-1].startswith(".env") else None
-            )
+            return f"Read: {rel} is a secrets file" if _targets_secret(rel) else None
         if cfg.is_protected(rel):
             return f"{tool}: {rel} is protected (harness.toml); stop and report instead"
         return None

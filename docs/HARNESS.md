@@ -48,16 +48,20 @@ the issue form. Everything ACP-specific sits in `harness.toml`, `CLAUDE.md` and
      candidate.
    - **Git-only checks.** The candidate is a ref, or a bundle quarantined at
      `refs/harness/candidate`. It must be named `agent/*` and descend from the
-     base. Its commits (`--no-renames`) must stay inside Allowed paths and
-     outside `protected`. None of this checks out or runs candidate code, so it
-     is safe on the host.
+     base, and it may contain no merge commits. **Every** commit, not just
+     the net diff (`--no-renames`), must stay inside Allowed paths and outside
+     `protected`, so a protected edit reverted later or a file added then
+     deleted is still caught. None of this checks out or runs candidate code,
+     so it is safe on the host.
    - **`--run-criteria`** executes candidate code in a detached worktree. It
      refuses on a Windows host and unless `ACP_SANDBOX=1`:
      - `verify` runs `scripts/verify.sh`
      - `pytest <node>` runs pytest on that node only; a node that collects no tests fails
      - `manual: ...` is listed as pending for the reviewer and Paul
 
-   A task is accepted only with `ok: true` **and** `criteria_run: true`.
+   A task is accepted only with `ok: true` **and** `criteria_run: true`. A
+   criteria run is never `ok` unless `verify` ran and passed, even if a
+   contract somehow reached the gate without one.
 6. *(Phase 3, not built.)* Draft PR against `main`. CI on that PR is the
    authority; the agent never merges.
 
@@ -104,7 +108,7 @@ claude -p \
 
 ### What was checked against the installed CLI (2026-11-15)
 
-Six live `claude -p` probes, about $0.25 in total. All ran on the host with prompts written by the harness author; no agent-generated code was executed:
+Eight live `claude -p` probes, about $0.45 in total. All ran on the host with prompts written by the harness author; no agent-generated code was executed:
 
 | Probe | Result |
 |---|---|
@@ -115,6 +119,7 @@ Six live `claude -p` probes, about $0.25 in total. All ran on the host with prom
 | `--max-budget-usd 0.01` | `error_max_budget_usd` at **$0.035**. The cap is checked between turns, so one turn can overshoot it |
 | `--agent reviewer` | its only tools were Read, Grep and Glob; no write was possible |
 | After G2: Read, Grep and Glob inside and outside the repo | inside allowed; `..`, `~/.claude` and `~/.ssh` blocked by the guard |
+| PR #1 review: a gitignored canary `.env.harness-probe`, at the root and in `tests/` | targeted Grep/Glob (path, `glob`, pattern) blocked by the guard; Read denied by the permission rule. Broad Grep, including `glob: '*'` and `'**/*'`, and Glob `*` never surfaced it: the tools skip hidden files. Glob does list gitignored non-hidden files. The canary value appeared nowhere in the output |
 
 ## Spending cap
 
@@ -135,7 +140,7 @@ Before any unattended run:
 - Permission rules in `dontAsk`: reads only inside the repo; Edit only under `src/` and `tests/`; Bash limited to verify, the project's pytest/ruff/mypy, and local git read/add/commit. Edits to protected paths, `git push`, `gh`, `curl`, `wget`, WebFetch, WebSearch and reading `.env*` are denied.
 - The guard hook blocks:
   - writes to protected paths or outside the repo, including on case-insensitive or `..` paths
-  - reads and searches (Read, Grep, Glob) outside the repo, and `.env*`
+  - reads and searches (Read, Grep, Glob) outside the repo, and any Read path, Grep path or `glob`, or Glob pattern that names or matches a secrets file (`.env*`, `*.env`)
   - any git use beyond the allowlist, git global options, and `--output`
   - network tools
   - shell commands that push, rewrite history, switch branches, install packages, reach the network, delete recursively or start a nested `claude`
@@ -166,8 +171,12 @@ fail again.
 | G3 | `conftest.py` was grantable, and it can fake a pass | Protected: `*conftest.py`, `*pytest.ini`, `*tox.ini`, `*setup.cfg`, `*sitecustomize.py`, `*usercustomize.py`, `*.pth` |
 | G4 | The guard missed `git -C`, `git -c` and `--output` | Git is parsed with `shlex` and held to an allowlist (status, diff, log, show, add, commit, rev-parse, ls-files). Global options other than `--no-pager` and `-P` are refused, as are `--output` and `commit -n`. Nested `sh -c` and `eval` are blocked |
 | G5 | Nothing checked ancestry | The candidate must descend from the base and be named `agent/*`. A bundle must carry exactly that one head |
+| R1 (PR #1, P1) | An empty code fence in Acceptance criteria normalised to zero criteria and skipped the verify rule; the gate then accepted a run that verified nothing | The parser requires `verify` unconditionally. The gate never reports a criteria run `ok` without a passing `verify` |
+| R2 (PR #1, P2) | Scope looked only at the endpoint diff, so a protected edit reverted later passed | Every commit in `base..tip` is checked, plus the net diff. Merge commits are refused |
+| R3 (PR #1, P2) | The `.env` check covered Read only; Grep and Glob returned first | One secret-file check covers Read paths, Grep `path` and `glob`, and Glob patterns. Permissions deny `.env*` and `*.env` at any depth. Confirmed live with a canary |
 
 **Still open:**
+- **Secrets in non-dot files.** The search tools skip *hidden* files, so `.env*` is safe even in broad searches. A secret in a non-hidden file, such as `prod.env` or `secrets.yaml`, could still surface through a broad Grep. The guard blocks targeted searches for `*.env`; it can't police a plain `*`. The runner should hold no secrets in the checkout at all.
 - **G6.** Allowed tools take paths outside the repo, such as
   `ruff format <host path>` and `pytest --junitxml=<host path>`. Patterns can't
   close this; running in a disposable environment does.
