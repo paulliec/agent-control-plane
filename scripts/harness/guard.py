@@ -132,6 +132,8 @@ def decide(
         pattern = str(tool_input.get("pattern", ""))
         if tool == "Glob" and (
             Path(pattern).is_absolute()
+            # drive paths, whichever OS the guard happens to run on
+            or re.match(r"^[A-Za-z]:", pattern)
             or pattern.startswith(("/", "\\", "~"))
             or ".." in re.split(r"[\\/]", pattern)
         ):
