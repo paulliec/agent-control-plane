@@ -399,3 +399,16 @@ def test_eligibility_input_is_not_mutated(cfg: Config) -> None:
     before = copy.deepcopy(i)
     contract.eligibility_problems(i, cfg, NEXT_MD)
     assert i == before
+
+
+def test_ci_token_is_read_only_and_not_persisted() -> None:
+    # CI executes PR code, agent-written included; its token must not be able to write
+    ci = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    assert ci["permissions"] == {"contents": "read"}
+    for job in ci["jobs"].values():
+        assert "permissions" not in job  # no job widens the workflow default
+        checkouts = [
+            s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout")
+        ]
+        assert checkouts
+        assert all(s.get("with", {}).get("persist-credentials") is False for s in checkouts)
