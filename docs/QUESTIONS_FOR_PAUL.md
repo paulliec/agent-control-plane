@@ -411,10 +411,10 @@ plausibly the `QUERY_TAG` — and that needs deciding before data lands. 🟡
 spaces in it, which is cosmetic; see above.
 
 ### Q23. Parent directory is itself a git repo
-`C:/Users/paulc/Documents` is a git repository containing ~20 untracked
+The directory that contains this checkout is a git repository with ~20 untracked
 projects. I left it completely untouched per your instruction. This project now
 has its own repo nested inside it, which git will treat as an embedded
 repository if anyone ever stages it from the parent.
 
 **Recommendation:** clean up the parent separately, as you planned. Until then,
-avoid running `git add` from `Documents`. **Cost:** 🟢 if handled deliberately.
+avoid running `git add` from that parent directory. **Cost:** 🟢 if handled deliberately.

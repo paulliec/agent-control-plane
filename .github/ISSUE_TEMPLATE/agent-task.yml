@@ -1,0 +1,48 @@
+# Task contract for the unattended harness (docs/HARNESS.md). Labels below
+# must match FIELDS in scripts/harness/contract.py. Filing this does nothing on
+# its own: a task is only eligible once the repo owner applies acp:approved.
+name: Agent task
+description: A scoped task contract the development harness may pick up once approved.
+title: "[agent] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only issues authored **and** labelled `acp:approved` by the repo owner are eligible.
+        Editing the body after approval revokes it until the label is re-applied.
+  - type: textarea
+    attributes:
+      label: Goal
+      description: One outcome, in a sentence or two.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Approved work item
+      description: Exactly as numbered in docs/NEXT.md "Current approved work", e.g. `1. Public demo readiness / deployment`.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Allowed paths
+      description: One repo-relative path or glob per line. Cannot overlap harness.toml protected paths.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Acceptance criteria
+      description: |
+        One per line, closed vocabulary — nothing here is run as a command:
+        `verify` (required) · `pytest tests/<file>.py[::<test>]` · `manual: <what a reviewer checks>`
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Stop conditions
+      description: When to stop and report instead of continuing. docs/NEXT.md's list always applies too.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Out of scope
+      description: Optional. Things that look related and must not be touched.

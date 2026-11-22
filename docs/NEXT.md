@@ -16,6 +16,29 @@ decision, not a backlog ticket.
 2. **Code-review / demo documentation.** README as a reviewer's entry point, the
    harness files (`CLAUDE.md`, `CURRENT_STATE.md`, this file, `scripts/verify.sh`),
    and the safety scrub that makes the repo publishable.
+3. **Development harness, Phase 0/1.5.** Task contracts and eligibility
+   checks, implementer and read-only reviewer agents, the trusted verifier and
+   protected-path checks, unattended permission settings, the Phase 1.5
+   security fixes, and their documentation (`docs/HARNESS.md`). Branch
+   `feat/autonomous-harness` only. Not approved within this item: scheduled or
+   unattended runs, publishing branches, opening PRs, changes to CI or GitHub
+   repository settings, and any change to application logic.
+
+   As originally approved, the item excluded all of the above. Two limited
+   exceptions were made afterwards, each by a later instruction from Paul. The
+   exclusions stand for everything else, including all Phase 2 execution and
+   publishing.
+   - **Publishing (2026-11-15):** Paul approved pushing
+     `demo-release-readiness` and `feat/autonomous-harness`, and opening draft
+     PR #1 against `demo-release-readiness`. Nothing else is published.
+   - **CI token hardening (`e322bc4`, 2026-11-15):** Paul asked for explicit
+     minimum CI token permissions. The commit sets a workflow-level
+     `permissions: contents: read` in `.github/workflows/ci.yml`. In the same
+     commit, the harness author added `persist-credentials: false` on
+     checkout; Paul did not ask for it, and it was accepted in the independent
+     review of `e322bc4`. Both are pinned by
+     `test_ci_token_is_read_only_and_not_persisted`. No verification command,
+     trigger or threshold changed. Any other CI change remains excluded.
 
 Tests for new deterministic behaviour are in scope. Lowering an existing gate to
 make something fit is not.
@@ -24,6 +47,8 @@ make something fit is not.
 
 Designed, discussed or obvious — none of it authorized:
 
+- Harness Phase 2+: headless runner, scheduled or hosted runs, GitHub writes
+  (labels, comments, branches, PRs)
 - Tollgate 3, in whole or in part
 - Agent discovery / inventory
 - Declared-vs-observed reconciliation
