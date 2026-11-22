@@ -21,8 +21,18 @@ decision, not a backlog ticket.
    protected-path checks, unattended permission settings, the Phase 1.5
    security fixes, and their documentation (`docs/HARNESS.md`). Branch
    `feat/autonomous-harness` only. Not approved within this item: scheduled or
-   unattended runs, publishing branches, opening PRs, changes to CI or GitHub
-   repository settings, and any change to application logic.
+   unattended runs, any further publishing or PRs, changes to GitHub repository
+   settings, and any change to application logic.
+
+   Two narrow exceptions were each approved separately by Paul:
+   - **Publishing:** pushing `demo-release-readiness` and
+     `feat/autonomous-harness`, and opening draft PR #1 against
+     `demo-release-readiness` (2026-11-15). Nothing else is published.
+   - **CI token hardening (`e322bc4`):** in `.github/workflows/ci.yml`, a
+     workflow-level `permissions: contents: read` and `persist-credentials: false`
+     on checkout, pinned by `test_ci_token_is_read_only_and_not_persisted`. No
+     verification command, trigger or threshold changed. Any other CI change
+     remains outside this item.
 
 Tests for new deterministic behaviour are in scope. Lowering an existing gate to
 make something fit is not.

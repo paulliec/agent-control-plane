@@ -130,5 +130,5 @@ Accurate as of the date above. None of these are bugs; all are deliberate stops.
 ## Branches
 
 `main` is the integration branch; feature work happens on a branch and is not
-merged by an agent. Current: `feat/autonomous-harness`, on top of
-`demo-release-readiness`; neither is pushed.
+merged by an agent. Current: `feat/autonomous-harness`, draft PR #1 against
+`demo-release-readiness`. Both are published; neither is merged into `main`.

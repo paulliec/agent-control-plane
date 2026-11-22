@@ -151,7 +151,7 @@ Before any unattended run:
 - Contracts can't execute anything, can't grant protected paths, and must include `verify`.
 - Eligibility requires the owner as both author and approver, and an unedited body.
 - The reviewer has no write or execute tools.
-- CI (`.github/workflows/ci.yml`) is untouched and runs the same gates. No agent can edit it (`.github/*` is protected).
+- CI (`.github/workflows/ci.yml`) runs the same gates. The harness changed only its token, and nothing that verifies: `permissions: contents: read` and `persist-credentials: false` (`e322bc4`, the CI exception in `NEXT.md` item 3, pinned by a test). No agent can edit it (`.github/*` is protected).
 
 **Not yet guaranteed.** See "Open risks" below.
 
@@ -199,11 +199,13 @@ They are separated by which settings load, not by loosening anything:
 
 ## Git baseline
 
-Checked 2026-11-15, read-only:
+Checked 2026-11-22, read-only:
 
-- **8 commits exist only locally**, `83e1f0b`..`abcb04a` (console query layer
-  through the public-demo bootstrap). `origin/main` and `origin/tollgate-2-hardening`
-  are both `63f332d`.
+- **The baseline is published.** The 8 commits `83e1f0b`..`abcb04a` (console
+  query layer through the public-demo bootstrap) are on
+  `origin/demo-release-readiness`. The harness is on
+  `origin/feat/autonomous-harness`, in draft PR #1 against it. `origin/main` and
+  `origin/tollgate-2-hardening` are still both `63f332d`.
 - **Every local branch is an ancestor of `demo-release-readiness` (`abcb04a`)**:
   `main`, `tollgate-2-hardening`, `tollgate-2-streamlit`. So `main` can later be
   fast-forwarded with nothing lost. `feat/autonomous-harness` sits on `abcb04a`.
@@ -413,22 +415,22 @@ These remain after Phase 1.5.
 
 ## Repository facts the harness depends on
 
-Checked 2026-11-15, read-only:
+Checked 2026-11-22, read-only:
 
-- **Remote branches:** `main` and `tollgate-2-hardening`, both at `63f332d`. All later work (`demo-release-readiness`, `feat/autonomous-harness`, 8 commits) is local only.
+- **Remote branches:** `main` and `tollgate-2-hardening`, both at `63f332d`. `demo-release-readiness` is at `abcb04a`; `feat/autonomous-harness` is draft PR #1 against it.
 - **Default branch:** `tollgate-2-hardening`. A `gh pr create` without `--base` would target it, so the harness always passes `--base` from `harness.toml`.
 - **Protection:** no branch protection or rulesets. Auto-merge is off.
-- **CI:** `.github/workflows/ci.yml` runs on `pull_request` (any base) and on `push` to `main`. It has run once, on a push to `main`. No PR has ever been opened.
+- **CI:** `.github/workflows/ci.yml` runs on `pull_request` (any base) and on `push` to `main`, with a `contents: read` token that is not left on disk. It runs on every push to PR #1.
 
-Recommended changes. None are made; they are Paul's call.
+Recommended changes. Only item 3 has been made; the rest are Paul's call.
 
 1. Make `main` the default branch once the local branches are reconciled. It is
    what CI and `NEXT.md` already treat as the integration branch.
 2. When protection is acceptable: require the `CI / quality` check and one
    review on `main`, and block force pushes.
-3. Add `permissions: contents: read` to `ci.yml`. CI needs nothing more, and a
-   PR from an agent branch should not get a write-capable token.
-4. Until `main` catches up, `--base main` is wrong. `main...HEAD` currently
-   includes all 8 unpushed commits (`CLAUDE.md`, `ci.yml`, `pyproject.toml`
-   and more), so the scope check would correctly fail any task. Fork the pilot
-   branch from the harness commit and pass that commit as `--base`.
+3. ~~Add `permissions: contents: read` to `ci.yml`.~~ Done in `e322bc4`,
+   together with `persist-credentials: false`.
+4. Until `main` catches up, `--base main` is wrong. `main...HEAD` includes
+   the 8 baseline commits (`CLAUDE.md`, `ci.yml`, `pyproject.toml` and more),
+   so the scope check would correctly fail any task. The verifier takes a
+   pinned SHA (`H`), never a branch name.
