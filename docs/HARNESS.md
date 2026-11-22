@@ -151,7 +151,7 @@ Before any unattended run:
 - Contracts can't execute anything, can't grant protected paths, and must include `verify`.
 - Eligibility requires the owner as both author and approver, and an unedited body.
 - The reviewer has no write or execute tools.
-- CI (`.github/workflows/ci.yml`) runs the same gates. The harness changed only its token, and nothing that verifies: `permissions: contents: read` and `persist-credentials: false` (`e322bc4`, the CI exception in `NEXT.md` item 3, pinned by a test). No agent can edit it (`.github/*` is protected).
+- CI (`.github/workflows/ci.yml`) runs the same gates. The harness changed only its token, and nothing that verifies: `permissions: contents: read` and `persist-credentials: false` (`e322bc4`; a limited scope exception recorded with its approval history in `NEXT.md` item 3, and pinned by a test). No agent can edit it (`.github/*` is protected).
 
 **Not yet guaranteed.** See "Open risks" below.
 
