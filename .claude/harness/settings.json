@@ -25,6 +25,8 @@
       "Bash(git commit *)"
     ],
     "deny": [
+      "Edit(./.git)",
+      "Edit(./.git/**)",
       "Edit(./CLAUDE.md)",
       "Edit(./harness.toml)",
       "Edit(./pyproject.toml)",

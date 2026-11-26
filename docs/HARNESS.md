@@ -1,9 +1,9 @@
 # Development harness
 
 How an agent may work on this repo without someone watching, and what stops it
-doing anything else. Status: **Phase 0/1.5** (`docs/NEXT.md` item 3): scaffolding
-plus the Phase 1.5 security fixes. Nothing runs on a schedule, nothing
-publishes, nothing opens a PR, and no workflow exists yet.
+doing anything else. Status: **Phase 0/1.5** (`docs/NEXT.md` item 3), plus the **pilot runner** (item 4),
+implemented but never run live. Nothing runs on a schedule, nothing publishes,
+nothing opens a PR.
 
 Rules of the road still come from `CLAUDE.md` and `docs/NEXT.md`. This file
 covers the machinery around them.
@@ -84,7 +84,7 @@ Contracts can't contain commands. A criterion is one of exactly three forms:
 | `pytest tests/<path>.py[::<name>]` | `python -m pytest <node> -q`; the node must match `^tests/[\w/]+\.py(::\w+)*$` |
 | `manual: <text>` | nothing; the reviewer and Paul judge it |
 
-## Running unattended (once Phase 2 exists)
+## Running the engine headless
 
 The invocation, as validated against Claude Code **2.1.325**:
 
@@ -121,18 +121,40 @@ Eight live `claude -p` probes, about $0.45 in total. All ran on the host with pr
 | After G2: Read, Grep and Glob inside and outside the repo | inside allowed; `..`, `~/.claude` and `~/.ssh` blocked by the guard |
 | PR #1 review: a gitignored canary `.env.harness-probe`, at the root and in `tests/` | targeted Grep/Glob (path, `glob`, pattern) blocked by the guard; Read denied by the permission rule. Broad Grep, including `glob: '*'` and `'**/*'`, and Glob `*` never surfaced it: the tools skip hidden files. Glob does list gitignored non-hidden files. The canary value appeared nowhere in the output |
 
-## Spending cap
+## Budget and accounting
 
-`harness.toml` `max_budget_usd = 0` means *unset*, and a test pins it there.
-Before any unattended run:
+`harness.toml` `[budget]` holds the values approved for P1: **$3.00 per task** in
+total, made up of **$2.00 for the implementer** and **$0.75 for the reviewer**,
+under a **$5.00 configuration ceiling**. `test_budget_and_limits_are_the_approved_values`
+pins them; changing them needs a new approval.
 
-1. Run the pilot supervised and record what it cost (`total_cost_usd` in the JSON).
-2. Set the cap to that cost plus headroom. Expect each overshoot to be up to one
-   turn's cost; at today's prices that is cents, but it scales with context size.
-3. Change the test on purpose, in the same commit as the cap.
+| Limit | Kind | Enforced by |
+|---|---|---|
+| Workspace spend limit (provider side, set by Paul) | **hard** | Anthropic. The only limit that holds whatever the harness does |
+| Per task, cumulative across attempts | refuses up front | `ledger.py`, before every attempt |
+| Per invocation ($2.00 implementer, $0.75 reviewer; 20 and 8 turns) | soft | `--max-budget-usd`, `--max-turns`. Checked between turns, so each can overshoot by about one turn (observed: a $0.01 cap stopped at $0.035) |
+| One attempt per approval | hard | `ledger.py`: a second reservation after the same approval is refused |
+| Wall clock | hard | `timeout-minutes` per job; `timeout_s` on the container |
 
-`--max-budget-usd` applies per invocation, so a runner making several calls
-(implementer, repairs, reviewer) must track the total itself.
+**Accounting.** Reservations are recorded *before* any model call; the
+`account` job settles them afterwards.
+1. `authorize` posts a reservation comment for exactly this run attempt
+   ($2.75), and reads it back. If it can't see its own reservation, it refuses.
+2. The `agent` and `review` jobs start the engine only under that reservation,
+   matched by run ID, run attempt, contract digest and base. A GitHub "re-run"
+   is a new attempt with no reservation, so it refuses.
+3. `account` (`if: always()`) records the costs the engine reported.
+
+A reservation with no account (cancelled, crashed, runner lost) counts at its
+full $2.75. A missing, negative or non-numeric cost counts at its allocation.
+`account` only ever *lowers* a count to a reported figure; it isn't what makes
+accounting durable. Only comments by `github-actions[bot]` count. A malformed
+bot record, or comments that can't be read, refuse the run.
+
+**Overshoot exposure.** With $2.75 reserved and $0.25 of headroom in the task
+budget, the worst case per attempt is $2.75 plus about one turn each for the
+implementer and the reviewer. After that the ledger refuses further attempts,
+and the workspace limit caps everything.
 
 ## Controls
 
@@ -234,7 +256,7 @@ notes. Anything those pages leave undocumented is marked so here.
 | Runs with PC off | yes | yes | **no** |
 | Compute cost | subscription usage; hourly run caps | free on standard runners for a public repo | free, but this machine |
 | Model credential | Anthropic-side; never in the VM | API key secret in the agent job; a dedicated, spend-limited workspace key | API key in the container |
-| GitHub credential | held by an Anthropic proxy, outside the VM; **can push any branch** unless rulesets stop it | none in the agent job (`permissions: {}`, `persist-credentials: false`); a separate publish job gets a short-lived `GITHUB_TOKEN` | none |
+| GitHub credential | held by an Anthropic proxy, outside the VM; **can push any branch** unless rulesets stop it | no `contents: write` anywhere, and checkouts don't keep their token (`persist-credentials: false`); a person publishes | none |
 | Our flags (`--settings`, `dontAsk`, `--max-turns`, `--max-budget-usd`) | **not documented**; routines run in auto mode; repo `.claude/settings.json` hooks apply | exact: the same invocation validated locally | exact |
 | Network egress | None / Limited allowlist / Full | **unrestricted** on GitHub-hosted runners | fully controllable |
 | Independent verifier | not native; needs CI anyway | native: a separate job with no secrets, from the pinned SHA | custom |
@@ -254,38 +276,51 @@ budget control for routines. Until then it can't enforce `dontAsk`, and it
 needs rulesets before its push access is acceptable. C is only for reproducing
 a run locally.
 
-### Proposed workflow shape (not written yet)
+### Pilot runner (PR #2, implemented; never run live)
 
-Four jobs. Only the last one can write to GitHub.
+`.github/workflows/agent-pilot.yml`. Each job calls one stage of
+`scripts/harness/pilot.py`.
 
-1. **`agent`**
-   - **Token:** `permissions: {}`; checkout at the pinned base `H` with
-     `persist-credentials: false`, so no git credentials are on disk.
-   - **Branch:** creates `agent/<n>-<slug>`.
-   - **Run:**
-     `claude -p --settings .claude/harness/settings.json --setting-sources project --permission-mode dontAsk --permission-prompts none --max-turns 20 --max-budget-usd <cap>`.
-     **Never `--bare`**: it skips hooks, including the guard.
-   - **Secrets and limits:** the API key comes from a GitHub environment with
-     a required reviewer, so Paul approves each run. `timeout-minutes` caps
-     wall-clock time.
-   - **Output:** a git bundle and the JSON transcript, as artifacts.
-2. **`check`**
-   - **Token:** `contents: read`, no secrets; checkout at `H`.
-   - **Run:** `python -m scripts.harness.gate --base H --ref agent/... --bundle agent.bundle --contract ...`.
-     That is git-only: pinned base, ancestry, the ref name, and scope.
-   - **Trust:** it never executes candidate code, so its verdict is the
-     trustworthy one.
-3. **`criteria`**
-   - **Token:** `contents: read`, no secrets; a fresh runner.
-   - **Run:** `ACP_SANDBOX=1 ... gate --run-criteria`, which runs `verify.sh`
-     and the pytest node.
-   - **Trust:** this runs untrusted code, so its result is evidence, not a
-     verdict. The runner's isolation is the protection, not the flag.
-4. **`publish`**
-   - **Condition:** needs `check` and `criteria`; gated by environment approval.
-   - **Token:** `contents: write`; pushes **only** `refs/heads/agent/*` from
-     the bundle.
-   - **Not in scope yet:** PRs and labels are Phase 3.
+**Trust anchor.** A push to `pilot/<issue>` starts the workflow, but the push
+isn't what's trusted. `authorize` requires all of the following:
+- the pushed commit is the workflow's own commit (`GITHUB_SHA` == `GITHUB_WORKFLOW_SHA`);
+- the checkout is clean at that commit;
+- the commit is already on `integration_branch`, so it landed through a reviewed PR;
+- the approved issue's **Pinned base** names that commit;
+- the issue's contract matches, by digest, the contract committed there.
+
+The digest is taken over the parsed, whitespace-normalised fields, with the
+pinned base excluded. Every money-spending job re-checks all of this after its
+environment approval. Candidate content exists only as a bundle, and is never
+on a branch any workflow runs from.
+
+| Job | Token | Secret | Runs candidate code | Does |
+|---|---|---|---|---|
+| `authorize` | contents read, issues write | none | no | Trust anchor; ledger check; posts the **reservation** |
+| `agent` | contents read, issues read | model key (`acp-agent` approval) | **no**: tools are Read/Edit/Write/Grep/Glob only | The engine edits a separate clone. Trusted code commits with an external git dir, hooks and fsmonitor off, then bundles. The engine's environment is scrubbed (no `GH_TOKEN`) |
+| `check` | contents read | none | no | **Trusted verdict**: pinned base, bundle digest and tip bound, ancestry, no merges, `agent/*`, scope on every commit, secret scan of every added line |
+| `criteria` | contents read | none | **yes, in a container** | Wheelhouse built from the base's `pyproject.toml`. Then `trusted_baseline` (base tests) and `candidate_authored` (contract criteria), each in its own fresh clone and container |
+| `review` | contents read, issues read | model key (`acp-agent` approval) | no | Reviewer with Read/Grep/Glob only, under `--json-schema`. Gets the contract, diff and labelled evidence, all digest-checked, but never the implementer's transcript |
+| `account` | contents read, issues write | none | no | Settles the reservation with reported costs |
+| `verdict` | contents read | none | no | `ready_for_human` only if every stage passed and every digest matches |
+
+**Container** (`sandbox.py`):
+- `--network none`;
+- an environment built from constants only (no host value is forwarded);
+- the runner's non-root uid, with every capability dropped and `no-new-privileges`;
+- a read-only root filesystem, with a tmpfs `/tmp` that holds the offline venv;
+- 2 CPUs, 6 GB memory, 512 processes, and a 20-minute limit;
+- an image pinned by digest;
+- only two mounts: the candidate clone and the read-only wheelhouse.
+
+`ACP_SANDBOX=1` is an accident guard only; the container is the isolation.
+
+**Artifact binding.** `check` re-derives the tip and the bundle digest. Every
+later job refuses a bundle or evidence file whose sha256 differs from the value
+recorded upstream.
+
+**Publication.** None. The output is `agent.bundle` plus evidence. Paul
+publishes by hand (see the pilot sequence below).
 
 ### Properties the runner must enforce, not the harness
 
@@ -300,60 +335,72 @@ runner configuration or from GitHub:
 | No personal model credential | a dedicated API key in its own Console workspace, never `claude setup-token` |
 | Hard spend cap | the workspace spend limit; `--max-budget-usd` overshoots by about one turn |
 | Wall-clock and resource limits | `timeout-minutes` and runner size |
-| Only `agent/*` is ever pushed | the `publish` job's refspec now; a ruleset later (a repo setting) |
+| Nothing is pushed automatically | no job has `contents: write` (pinned by a test); Paul pushes the verified bundle by hand. A ruleset comes later (a repo setting) |
 | A person approves each run | GitHub environment required reviewers (a repo setting) |
 | Network egress limits | **not available** on standard hosted runners. The exposure is accepted and bounded: a spend-limited key and no GitHub token in the job. A third-party egress policy or self-hosted runner is optional later |
 | Only the owner can trigger | the workflow's trigger and `if:` on `github.actor`; contract eligibility re-checks the owner |
 
 ## First supervised pilot: exact sequence
 
-The pilot is run by hand on GitHub Actions while Paul watches. Every step that
-publishes or changes a setting is a separate approval.
+Paul is present throughout, and each numbered group is a separate approval.
 
-**Preparation (Paul):**
-1. In the `agent control plane` worktree, commit or set aside the uncommitted
-   README/`requirements.txt` work on `demo-release-readiness`. The harness
-   branch doesn't depend on it.
-2. Optionally remove the local path from `docs/QUESTIONS_FOR_PAUL.md` Q23
-   before anything is published.
-3. Publish the baseline and the harness branch (see "Publishing" below).
+**A. Integrate PR #2.** Push `feat/pilot-runner`, open PR #2 against
+`demo-release-readiness`, get an independent review and green CI, then merge.
+The merge commit is **H**.
 
-**Infrastructure (separate approvals):**
-4. Create a dedicated Anthropic Console workspace with a low spend limit
-   (suggested $5) and an API key in it.
-5. Create a GitHub environment, `acp-agent`: required reviewer Paul, with the
-   key as its only secret.
-6. Add the four-job workflow on `feat/autonomous-harness`. It is triggered by
-   `push` to `pilot/*`, because schedule and dispatch only run from the
-   default branch. Set `max_budget_usd` in `harness.toml` and flip its test in
-   the same commit.
+**B. Provider and GitHub setup.**
+1. Create an Anthropic Console workspace for this repo with a **$5 monthly
+   spend limit**, and an API key in it.
+2. Create the GitHub environment `acp-agent`: required reviewer `paulliec`,
+   deployment branches `pilot/*`, secret `ANTHROPIC_API_KEY`.
+3. Create the environment `acp-canary` for drills: required reviewer,
+   deployment branches `pilot-drill/*`, secret `ANTHROPIC_API_KEY` set to a
+   random `ACP_CANARY_...` value. It is never a real key.
+4. Create the labels `acp:approved` and `acp:blocked`.
 
-**Run:**
-7. Pin `H = git rev-parse feat/autonomous-harness` after step 6. Check it
-   locally with `contract check-file docs/harness/pilot-demo-counts.md`
-   (`eligible: true`).
-8. Push `pilot/1` at `H`. Approve the `acp-agent` environment prompt and watch
-   the `agent` job: at most 20 turns, within the cap.
-9. `check` must report `ok: true`. `criteria` must report every automated
-   criterion `pass`.
-10. **Repair:** if `check` or `criteria` fails and the implementer didn't stop,
-    re-run with the gate output, at most twice. After that, stop.
-11. **Review:** Paul runs the reviewer (Read, Grep and Glob only) on the
-    contract and the diff. Paul reads `gate.json`, the transcript and the
-    diff, and decides the manual criteria.
-12. **Publish:** approve `publish` only if satisfied. It pushes
-    `agent/1-demo-counts` and nothing else. No PR is opened.
-13. **Record:** cost, turns, denials, repairs and verdicts, in a pilot log
-    under `docs/harness/`. Set the real budget cap from what the run cost.
+**C. Live drills.** These use the fake engine and cost nothing. They need
+scripts under `docs/harness/drills/`, which are added when the drills are
+approved. Each drill must end in a verdict that isn't ready, for the stated
+reason, and spend no money:
+- credential reads from inside the container
+- network egress
+- protected-path edits
+- a canary secret in the diff
+- a test that fakes its own pass
+- a substituted bundle
+- a duplicate push
+- an exhausted budget
+- an edit to the issue after approval
+
+**D. P1.**
+1. Create issue N from the **Agent task** form. Copy the body from
+   `docs/harness/pilot-demo-counts.md` and set **Pinned base** = H. Then apply
+   `acp:approved`.
+2. Push the trigger: `git push origin H:refs/heads/pilot/N`.
+3. Approve `acp-agent` for `agent`, and later for `review`. Watch the run.
+4. Read `verdict`, which shows `ready_for_human`, the problems, and the manual
+   criteria. Read the evidence artifacts: `gate-check.json`, `diff.patch`,
+   `criteria.json`, `review.json` and `implementer-run.json`.
+
+**E. Human publication.** Only if satisfied:
+```
+gh run download <run-id> -n agent-1 -D bundle
+sha256sum bundle/agent.bundle            # must equal the check job's bundle_sha256
+git fetch bundle/agent.bundle agent/N:agent/N
+git log --oneline H..agent/N             # exactly the commit the verdict names
+git push origin agent/N
+gh pr create --draft --base demo-release-readiness --head agent/N
+```
+CI runs on that PR independently.
 
 **Abort on any of these:**
 - a permission denial or guard block nobody expected
-- `check` rejects the bundle
+- a reservation you didn't expect
 - spend above the cap
-- the implementer edits anything outside the contract
+- any file outside `tests/test_demo_counts.py`
 
-If the counts disagree with `CURRENT_STATE.md` and the implementer stops, the
-harness passed.
+If the documented counts disagree and the implementer stops (`no_changes`),
+the harness has passed.
 
 ## Publishing
 

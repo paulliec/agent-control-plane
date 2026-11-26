@@ -39,6 +39,26 @@ decision, not a backlog ticket.
      review of `e322bc4`. Both are pinned by
      `test_ci_token_is_read_only_and_not_persisted`. No verification command,
      trigger or threshold changed. Any other CI change remains excluded.
+4. **Pilot runner (PR #2), supervised implementation.** Approved 2026-11-26
+   with the independent review's amendments. Covers the minimal GitHub Actions
+   runner for P1 (`.github/workflows/agent-pilot.yml`, `scripts/harness/pilot.py`,
+   `ledger.py`, `sandbox.py`, `engines/`) on branch `feat/pilot-runner`, with:
+   - a trust anchor bound to an integration-branch commit, the workflow at that
+     commit, and the approved contract's digest;
+   - no automated publication;
+   - the $3 per-task / $2 implementer / $0.75 reviewer budget, reserved before
+     any model call;
+   - a reviewer verdict that must be an explicit clean `approve`;
+   - candidate code only in a network-isolated container;
+   - fake-engine and deterministic tests.
+
+   Local commits only. Not approved within this item:
+   - pushing branches or opening PR #2
+   - GitHub environments, secrets or repository settings
+   - live GitHub drills
+   - any paid model call, including running P1 against a real model
+   - standalone harness extraction
+   - any change to application behaviour
 
 Tests for new deterministic behaviour are in scope. Lowering an existing gate to
 make something fit is not.

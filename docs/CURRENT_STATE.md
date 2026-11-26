@@ -3,7 +3,7 @@
 A resumability checkpoint: what works, what is deliberately missing, and whether
 the repo is green. Read with `NEXT.md`, which says what is approved to build.
 
-**Last verified:** 2026-11-15, on branch `feat/autonomous-harness`.
+**Last verified:** 2026-11-26, on branch `feat/pilot-runner`.
 
 ## Milestone
 
@@ -19,8 +19,8 @@ Obtained by running `./scripts/verify.sh`:
 |---|---|
 | `ruff format --check .` | clean |
 | `ruff check .` | clean |
-| `mypy --strict` (src + tests + scripts) | clean, 58 files |
-| `pytest --cov` | **591 passed**, **97.62%** coverage (floor 96%) |
+| `mypy --strict` (src + tests + scripts) | clean, 64 files |
+| `pytest --cov` | **669 passed**, **97.62%** coverage (floor 96%) |
 | Demo seed from committed fixtures | 166 events, 20 violations |
 | CLI smoke (`stats`/`runs`/`violations`/`trace`/`evaluate`) | clean |
 
@@ -122,13 +122,16 @@ Accurate as of the date above. None of these are bugs; all are deliberate stops.
 4. Needs-attention panel with drill-downs.
 5. Snowflake native agent telemetry for attribution (`AGENT_TYPE` / `AGENTS_INFO`).
 6. Project harness, self-seeding public demo, deployment readiness.
-7. *This change:* development harness Phase 0/1.5: scaffolding plus the
+7. Development harness Phase 0/1.5: scaffolding plus the
    Phase 1.5 security fixes (`docs/HARNESS.md`). 176 of the 591 tests are
    harness tests. Coverage measures only the package, so the figure is
    unchanged.
+8. *This change:* pilot runner (PR #2), implemented on `feat/pilot-runner`,
+   never run live (`docs/HARNESS.md`, "Pilot runner"). 78 new tests: 254 of
+   the 669 are harness tests.
 
 ## Branches
 
 `main` is the integration branch; feature work happens on a branch and is not
-merged by an agent. Current: `feat/autonomous-harness`, draft PR #1 against
-`demo-release-readiness`. Both are published; neither is merged into `main`.
+merged by an agent. Current: `feat/pilot-runner`, local only, on top of
+`demo-release-readiness` (`f0b5f57`, which includes the merged PR #1).

@@ -1,0 +1,293 @@
+# Supervised pilot runner: one approved task per run (docs/HARNESS.md, "Pilot runner").
+#
+# Trust is not the push. scripts/harness/pilot.py requires the pushed commit to be
+# the workflow's own commit, already on the integration branch, and the commit the
+# approved issue pins; the issue's contract must match the one committed there.
+#
+# Credentials, by job:
+#   model API key   agent, review only, released by environment approval; neither
+#                   job executes candidate code (no shell for the engine)
+#   issues: write   authorize (the ledger reservation) and account (settlement)
+#   contents: write nowhere. Nothing pushes, opens PRs or merges.
+# Candidate code runs only in `criteria`, inside a --network none container, in a
+# job that holds no secret at all.
+name: Agent pilot
+
+on:
+  push:
+    branches: ["pilot/*", "pilot-drill/*"]
+
+permissions: {}
+
+# duplicate pushes queue; they never run side by side
+concurrency:
+  group: acp-pilot-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CONTRACT: docs/harness/pilot-demo-counts.md
+  OUT: ${{ github.workspace }}/../pilot-out
+  EVIDENCE: ${{ github.workspace }}/../pilot-evidence
+
+jobs:
+  authorize:
+    if: github.actor == 'paulliec'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      issue: ${{ steps.auth.outputs.issue }}
+      contract_sha256: ${{ steps.auth.outputs.contract_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - id: auth
+        run: python -m scripts.harness.pilot authorize --contract "$CONTRACT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  agent:
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ startsWith(github.ref, 'refs/heads/pilot-drill/') && 'acp-canary' || 'acp-agent' }}
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      status: ${{ steps.agent.outputs.status }}
+      tip: ${{ steps.agent.outputs.tip }}
+      bundle_sha256: ${{ steps.agent.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install engine (pinned)
+        if: startsWith(github.ref, 'refs/heads/pilot/')
+        run: npm install -g @anthropic-ai/claude-code@2.1.325
+      - id: agent
+        run: python -m scripts.harness.pilot agent --contract "$CONTRACT" --out "$OUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AEH_FAKE_SCRIPT: ${{ github.workspace }}/docs/harness/drills/${{ needs.authorize.outputs.issue }}-implementer.json
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUT }}/agent.json
+            ${{ env.OUT }}/agent.bundle
+            ${{ env.OUT }}/implementer-run.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  check:
+    needs: [authorize, agent]
+    if: needs.agent.outputs.status == 'committed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+      tip: ${{ steps.check.outputs.tip }}
+      bundle_sha256: ${{ steps.check.outputs.bundle_sha256 }}
+      gate_sha256: ${{ steps.check.outputs.gate_sha256 }}
+      diff_sha256: ${{ steps.check.outputs.diff_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agent-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+      - id: check
+        run: >-
+          python -m scripts.harness.pilot check --contract "$CONTRACT"
+          --evidence "$EVIDENCE" --out "$OUT"
+          --expect "agent.bundle=${{ needs.agent.outputs.bundle_sha256 }}"
+          --tip "${{ needs.agent.outputs.tip }}"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: check-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUT }}/gate-check.json
+            ${{ env.OUT }}/diff.patch
+          retention-days: 90
+
+  criteria:
+    needs: [agent, check]
+    if: needs.check.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      ok: ${{ steps.criteria.outputs.ok }}
+      criteria_sha256: ${{ steps.criteria.outputs.criteria_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agent-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+      # trusted: dependencies come from the pinned base's pyproject, never the candidate's
+      - name: Build offline wheelhouse
+        run: python -m pip wheel -q --wheel-dir "$OUT/wheels" ".[dev,dashboard]"
+      - name: Pull sandbox image (pinned digest)
+        run: docker pull "$(python -c 'import tomllib;print(tomllib.load(open("harness.toml","rb"))["sandbox"]["image"])')"
+      - id: criteria
+        run: >-
+          python -m scripts.harness.pilot criteria --contract "$CONTRACT"
+          --evidence "$EVIDENCE" --wheels "$OUT/wheels" --out "$OUT"
+          --expect "agent.bundle=${{ needs.check.outputs.bundle_sha256 }}"
+          --tip "${{ needs.check.outputs.tip }}"
+        env:
+          ACP_SANDBOX: "1"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: criteria-${{ github.run_attempt }}
+          path: ${{ env.OUT }}/criteria.json
+          retention-days: 90
+
+  review:
+    needs: [authorize, agent, check, criteria]
+    if: needs.criteria.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ startsWith(github.ref, 'refs/heads/pilot-drill/') && 'acp-canary' || 'acp-agent' }}
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      accepted: ${{ steps.review.outputs.accepted }}
+      review_sha256: ${{ steps.review.outputs.review_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install engine (pinned)
+        if: startsWith(github.ref, 'refs/heads/pilot/')
+        run: npm install -g @anthropic-ai/claude-code@2.1.325
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: "{agent,check,criteria}-${{ github.run_attempt }}"
+          merge-multiple: true
+          path: ${{ env.EVIDENCE }}
+      # the implementer's transcript is in the evidence dir but never reaches the
+      # reviewer: review() builds its prompt from the contract, diff and gate output only
+      - id: review
+        run: >-
+          python -m scripts.harness.pilot review --contract "$CONTRACT"
+          --evidence "$EVIDENCE" --out "$OUT"
+          --expect "agent.bundle=${{ needs.check.outputs.bundle_sha256 }}"
+          --expect "gate-check.json=${{ needs.check.outputs.gate_sha256 }}"
+          --expect "diff.patch=${{ needs.check.outputs.diff_sha256 }}"
+          --expect "criteria.json=${{ needs.criteria.outputs.criteria_sha256 }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AEH_FAKE_SCRIPT: ${{ github.workspace }}/docs/harness/drills/${{ needs.authorize.outputs.issue }}-reviewer.json
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUT }}/review.json
+            ${{ env.OUT }}/reviewer-run.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Settles the reservation with reported costs. Not the accounting of record:
+  # if this never runs, the reservation already counts in full.
+  account:
+    needs: [authorize, agent, review]
+    if: always() && needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: "{agent,review}-${{ github.run_attempt }}"
+          merge-multiple: true
+          path: ${{ env.EVIDENCE }}
+      - run: >-
+          python -m scripts.harness.pilot account --contract "$CONTRACT"
+          --evidence "$EVIDENCE" --review-result "${{ needs.review.result }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  verdict:
+    needs: [authorize, agent, check, criteria, review]
+    if: always() && needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: "*-${{ github.run_attempt }}"
+          merge-multiple: true
+          path: ${{ env.EVIDENCE }}
+      # shell: bash runs with pipefail, so tee can't hide a not-ready exit code
+      - shell: bash
+        run: >-
+          python -m scripts.harness.pilot verdict --evidence "$EVIDENCE"
+          --expect "gate-check.json=${{ needs.check.outputs.gate_sha256 }}"
+          --expect "criteria.json=${{ needs.criteria.outputs.criteria_sha256 }}"
+          --expect "review.json=${{ needs.review.outputs.review_sha256 }}"
+          | tee "$GITHUB_STEP_SUMMARY"

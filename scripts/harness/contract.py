@@ -12,6 +12,7 @@ vocabulary the gate maps onto fixed commands.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -32,6 +33,10 @@ FIELDS = {
     "Acceptance criteria": "criteria",
     "Stop conditions": "stop_conditions",
     "Out of scope": "out_of_scope",
+    # Set when the issue is approved for execution: the integration commit the
+    # run must start from. Not part of the contract digest, so the committed
+    # contract file (which cannot contain its own commit SHA) still matches.
+    "Pinned base": "pinned_base",
 }
 REQUIRED = ("goal", "approved_item", "allowed_paths", "criteria", "stop_conditions")
 NO_RESPONSE = "_No response_"  # what GitHub renders for an empty form field
@@ -40,6 +45,7 @@ MAX_BODY = 20_000
 PATH_CHARS = re.compile(r"^[A-Za-z0-9_.*/-]+$")
 PYTEST_NODE = re.compile(r"^tests/[A-Za-z0-9_/]+\.py(::[A-Za-z0-9_]+)*$")
 APPROVED_ITEM = re.compile(r"^(\d+)\.\s+\*\*(.+?)\*\*", re.MULTILINE)
+FULL_SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 Kind = Literal["verify", "pytest", "manual"]
 
@@ -68,6 +74,7 @@ class Contract:
     criteria: tuple[Criterion, ...]
     stop_conditions: str
     out_of_scope: str
+    pinned_base: str = ""
 
 
 def _lines(text: str) -> list[str]:
@@ -159,6 +166,9 @@ def parse(body: str, cfg: Config) -> Contract:
     # must fail here, not slip through as "no criteria to check".
     if not any(c.kind == "verify" for c in criteria):
         problems.append("criteria must include 'verify'")
+    pinned = fields.get("pinned_base", "").strip()
+    if pinned and not FULL_SHA.fullmatch(pinned):
+        problems.append(f"pinned base {pinned!r} is not a full lowercase commit SHA")
 
     if problems:
         raise ContractError(problems)
@@ -169,7 +179,30 @@ def parse(body: str, cfg: Config) -> Contract:
         criteria=tuple(criteria),
         stop_conditions=fields["stop_conditions"],
         out_of_scope=fields.get("out_of_scope", ""),
+        pinned_base=fields.get("pinned_base", "").strip(),
     )
+
+
+def digest(c: Contract) -> str:
+    """Canonical sha256 of what was approved, excluding the pinned base.
+
+    Hashes the parsed fields, whitespace-normalised, rather than raw text:
+    an issue and the committed file then match when they say the same
+    thing, however GitHub re-wraps lines or line endings.
+    """
+    fields = {k: v for k, v in asdict(c).items() if k != "pinned_base"}
+    canon = json.dumps(_normalise(fields), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _normalise(v: Any) -> Any:
+    if isinstance(v, str):
+        return " ".join(v.split())
+    if isinstance(v, dict):
+        return {k: _normalise(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_normalise(x) for x in v]
+    return v
 
 
 def approved_items(next_md: str) -> list[str]:
@@ -272,11 +305,28 @@ def fetch_issue(number: int) -> dict[str, Any]:
     }
 
 
+def match_problems(task: Contract, expected: Path, cfg: Config) -> list[str]:
+    """The approved issue must say exactly what the committed contract says."""
+    try:
+        committed = parse(expected.read_text(encoding="utf-8"), cfg)
+    except (OSError, ContractError) as e:
+        return [f"committed contract {str(expected)!r} is unusable: {e}"]
+    if digest(task) != digest(committed):
+        return [f"issue contract does not match {expected.as_posix()} (digest differs)"]
+    return []
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="contract")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check-file").add_argument("path", type=Path)
-    sub.add_parser("check-issue").add_argument("number", type=int)
+    issue_cmd = sub.add_parser("check-issue")
+    issue_cmd.add_argument("number", type=int)
+    issue_cmd.add_argument(
+        "--expect-file",
+        type=Path,
+        help="committed contract the issue must match (by digest, pinned base excluded)",
+    )
     args = ap.parse_args(argv)
 
     cfg = config.load()
@@ -286,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         issue = fetch_issue(args.number)
         problems = eligibility_problems(issue, cfg, next_md)
         body = issue["body"]
+        if args.expect_file and not problems:
+            problems = match_problems(parse(body, cfg), args.expect_file, cfg)
     else:
         body = args.path.read_text(encoding="utf-8")
         problems = []
@@ -298,7 +350,9 @@ def main(argv: list[str] | None = None) -> int:
 
     result: dict[str, Any] = {"eligible": not problems, "problems": problems}
     if not problems:
-        result["contract"] = asdict(parse(body, cfg))
+        task = parse(body, cfg)
+        result["contract"] = asdict(task)
+        result["contract_sha256"] = digest(task)
     json.dump(result, sys.stdout, indent=2)
     print()
     return 0 if not problems else 1
