@@ -32,7 +32,7 @@ env:
 jobs:
   authorize:
     if: github.actor == 'paulliec'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -56,7 +56,7 @@ jobs:
 
   agent:
     needs: authorize
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: ${{ startsWith(github.ref, 'refs/heads/pilot-drill/') && 'acp-canary' || 'acp-agent' }}
     permissions:
@@ -98,7 +98,7 @@ jobs:
   check:
     needs: [authorize, agent]
     if: needs.agent.outputs.status == 'committed'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -139,7 +139,7 @@ jobs:
   criteria:
     needs: [agent, check]
     if: needs.check.outputs.ok == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
       contents: read
@@ -182,7 +182,7 @@ jobs:
   review:
     needs: [authorize, agent, check, criteria]
     if: needs.criteria.outputs.ok == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: ${{ startsWith(github.ref, 'refs/heads/pilot-drill/') && 'acp-canary' || 'acp-agent' }}
     permissions:
@@ -237,7 +237,7 @@ jobs:
   account:
     needs: [authorize, agent, review]
     if: always() && needs.authorize.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -265,7 +265,7 @@ jobs:
   verdict:
     needs: [authorize, agent, check, criteria, review]
     if: always() && needs.authorize.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

@@ -132,7 +132,8 @@ class GhCli:
         return contract.fetch_issue(number)
 
     def comments(self, number: int) -> list[dict[str, Any]]:
-        jq = ".[] | {author: .user.login, body: .body, created_at: .created_at} | @json"
+        jq = ".[] | {id: .id, author: .user.login, body: .body, created_at: .created_at, "
+        jq += "updated_at: .updated_at} | @json"
         out = subprocess.run(
             ["gh", "api", "--paginate", f"repos/{self.repo}/issues/{number}/comments", "--jq", jq],
             check=True,
@@ -201,19 +202,35 @@ def trust(
     return task, contract.digest(task), issue
 
 
+def _owner_check(
+    records: list[ledger.Record], digest: str, approved: datetime, run: Run
+) -> list[str]:
+    mine = ledger.reserved(records, digest, run.sha, run.run_id, run.attempt)
+    first = ledger.first_after(records, digest, approved)
+    if not mine or first is None or first.at <= approved:
+        return [
+            "no reservation for this run attempt after the current approval "
+            "(a re-run is a new attempt and needs a new dispatch)"
+        ]
+    if not ledger.owns(first, run.run_id, run.attempt, run.sha):
+        return ["another run reserved this approval first; this one stops (its spend still counts)"]
+    return []
+
+
 def authorize(run: Run, root: Path, cfg: Config, gh: GitHub, contract_path: str) -> dict[str, Any]:
     """Check, then reserve budget for this attempt before anything can spend it."""
     _, digest, issue = trust(run, root, cfg, gh, contract_path)
+    approved = approved_at(issue, cfg)
     records = ledger.parse(gh.comments(run.issue))
-    problems = ledger.start_problems(records, digest, approved_at(issue, cfg), cfg)
+    problems = ledger.start_problems(records, digest, approved, cfg)
     if problems:
         raise PilotError(problems)
     gh.comment(run.issue, ledger.reservation(cfg, digest, run.sha, run.run_id, run.attempt))
-    # don't assume the write landed: an unreadable ledger is an unknown ledger
-    if not ledger.reserved(
-        ledger.parse(gh.comments(run.issue)), digest, run.sha, run.run_id, run.attempt
-    ):
-        raise PilotError(["reservation was not recorded; refusing to continue"])
+    # read it back: an unreadable ledger is an unknown ledger, and a run that
+    # raced another for the same approval must find out now, before any spend
+    problems = _owner_check(ledger.parse(gh.comments(run.issue)), digest, approved, run)
+    if problems:
+        raise PilotError(problems)
     return {"issue": run.issue, "contract_sha256": digest, "base": run.sha, "engine": run.engine}
 
 
@@ -221,20 +238,11 @@ def require_reservation(
     run: Run, root: Path, cfg: Config, gh: GitHub, contract_path: str
 ) -> tuple[contract.Contract, str]:
     task, digest, issue = trust(run, root, cfg, gh, contract_path)
-    records = ledger.parse(gh.comments(run.issue))
-    mine = [
-        r
-        for r in records
-        if ledger.reserved([r], digest, run.sha, run.run_id, run.attempt)
-        and r.at > approved_at(issue, cfg)
-    ]
-    if not mine:
-        raise PilotError(
-            [
-                "no reservation for this run attempt after the current approval "
-                "(a re-run is a new attempt and needs a new dispatch)"
-            ]
-        )
+    problems = _owner_check(
+        ledger.parse(gh.comments(run.issue)), digest, approved_at(issue, cfg), run
+    )
+    if problems:
+        raise PilotError(problems)
     return task, digest
 
 

@@ -322,6 +322,100 @@ recorded upstream.
 **Publication.** None. The output is `agent.bundle` plus evidence. Paul
 publishes by hand (see the pilot sequence below).
 
+### What the runner relies on GitHub to enforce
+
+The trust checks in `pilot.py` run *inside* the workflow, so they protect only a
+workflow that calls them. Someone who can push a `pilot/*` branch can push a
+modified `agent-pilot.yml` that never runs `authorize` and simply asks for the
+`acp-agent` environment. **Nothing in the repository's code can prevent that.**
+What prevents it is outside the code:
+
+1. **Only the owner can push** `pilot/*` and `pilot-drill/*`. This repo has one
+   writer, and fork PRs can't push to it. Recommended later (a repo setting): a
+   ruleset restricting creation of those refs to the owner.
+2. **`acp-agent` has a required reviewer**, and deployment branches are limited
+   to `pilot/*`. `acp-canary` is limited to `pilot-drill/*`, so a drill branch
+   can never reach the real key, whatever its workflow says.
+3. **The key exists only as an `acp-agent` environment secret**, never as a
+   repository or organization secret. Ordinary CI on PRs runs candidate code,
+   and it has no secrets to leak.
+4. **Approval checklist.** Approve `acp-agent` only when all three hold:
+   - the run's commit is the issue's **Pinned base**;
+   - `authorize` has already passed in that same run;
+   - the job asking for approval is `agent` or `review`.
+
+   Anything else means the workflow isn't the reviewed one: reject the
+   deployment.
+
+An agent can't push at all: no job holds a write token. Its branches reach
+GitHub only when Paul pushes a verified bundle, as `agent/<n>`, which this
+workflow doesn't trigger on.
+
+### Ledger integrity
+
+- **Concurrent runs.** `pilot/7` and `pilot-drill/7` don't share a concurrency
+  group. If both reserve against one approval, the earliest reservation
+  (timestamp, then comment ID) proceeds and the other refuses. Both count as
+  spent.
+- **Bot identity.** Only comments by `github-actions[bot]` count. No user
+  account can hold that login, and the only other workflow here, CI, has no
+  `issues` permission.
+- **Edited records refuse.** A bot comment whose `updated_at` differs from its
+  `created_at` fails the run. Deleted records can't be detected from the
+  comments themselves. Only the owner or an admin can delete someone else's
+  comment, and the provider spend limit stays the hard cap either way.
+- **Run identity and replay.** A reservation belongs to one
+  (run ID, run attempt, contract digest, base). Re-runs are new attempts and
+  hold no reservation. "Re-run all jobs" reserves again, and that is refused
+  under the same approval.
+- **Scope of the budget.** The ledger lives on the issue, so the $3 is per
+  issue. Opening a new issue for the same contract is a new approval by the
+  owner and starts a new budget. The workspace limit caps the total.
+
+### Contract digest
+
+The digest is taken over the parsed fields. Free text has its whitespace
+collapsed. List items lose the `- `/`* `/checkbox markers and surrounding
+backticks. Pinned base is excluded and checked separately against the commit.
+
+Nothing material is normalised away: case, punctuation, lookalike and
+zero-width characters, splitting a token, scope, each criterion, and criterion
+order all change the digest. A test pins each of these. Text above the first
+`###` heading isn't part of the contract and never reaches a model: both
+agents are prompted with the committed file, not the issue.
+
+### Reproducibility
+
+| Pinned | Not pinned |
+|---|---|
+| Every action, by commit SHA | Python dependencies: `pyproject.toml` declares ranges (`pydantic>=2.7`, `streamlit>=1.35`, …) and there is no lock file, so the wheelhouse resolves whatever is current on PyPI |
+| Sandbox image `python:3.12-bookworm@sha256:5f0c…0dd6` | `hatchling`, the build backend |
+| Runner image `ubuntu-24.04` | Python patch version (`setup-python` "3.12") |
+| `@anthropic-ai/claude-code@2.1.325` | That package's own dependencies and install-time downloads (no lockfile or integrity pin) |
+| — | The runner's Docker, git and gh versions |
+
+A constraints file for the wheelhouse is the obvious next step, but it would
+change how CI installs, so it's out of scope here.
+
+### Harness test coverage
+
+The suite's coverage figure (97.62%, floor 96%) measures only the
+`agent_control_plane` package. Measured separately with
+`pytest tests/test_harness*.py --cov=scripts/harness --cov-fail-under=0`,
+harness coverage is **85%**:
+- `ledger.py` and `scope.py`: 100%
+- `gate.py` and `guard.py`: 98%
+- `config.py`: 92%
+- `contract.py`: 80%
+- `pilot.py`: 76%
+- `sandbox.py`: 71%
+- `fake.py`: 0%
+
+What isn't covered can only run against live services, or runs in a
+subprocess: the `gh` client and CLI entry points, `docker run` itself, and the
+fake engine (exercised by tests, but always in a subprocess coverage doesn't
+trace). No threshold changed.
+
 ### Properties the runner must enforce, not the harness
 
 The harness code can't guarantee any of these. Each has to come from the
@@ -352,7 +446,9 @@ The merge commit is **H**.
 1. Create an Anthropic Console workspace for this repo with a **$5 monthly
    spend limit**, and an API key in it.
 2. Create the GitHub environment `acp-agent`: required reviewer `paulliec`,
-   deployment branches `pilot/*`, secret `ANTHROPIC_API_KEY`.
+   deployment branches `pilot/*`, secret `ANTHROPIC_API_KEY` as an
+   **environment** secret only, never a repository or organization secret. See
+   "What the runner relies on GitHub to enforce" for the approval checklist.
 3. Create the environment `acp-canary` for drills: required reviewer,
    deployment branches `pilot-drill/*`, secret `ANTHROPIC_API_KEY` set to a
    random `ACP_CANARY_...` value. It is never a real key.

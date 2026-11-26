@@ -61,7 +61,10 @@ class FakeGitHub:
 
     def comment(self, number: int, body: str) -> None:
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        self.posted.append({"author": ledger.BOT, "body": body, "created_at": now})
+        self.posted.append(
+            {"id": len(self.posted) + 1, "author": ledger.BOT, "body": body,
+             "created_at": now, "updated_at": now}
+        )  # fmt: skip
 
 
 @pytest.fixture
@@ -861,3 +864,90 @@ def test_the_sandbox_image_is_pinned_by_digest() -> None:
     assert sb is not None
     name, _, digest = sb.image.partition("@sha256:")
     assert name and len(digest) == 64
+
+
+# --- self-review additions: races, tampering, pinning ---------------------------------
+
+
+class RacingGitHub(FakeGitHub):
+    """Another run's reservation lands between this run's check and its write."""
+
+    def comment(self, number: int, body: str) -> None:
+        if not self.posted:
+            data = json.loads(body.split("```json\n")[1].split("\n```")[0])
+            rival = ledger.render(data | {"run_id": "999"})
+            super().comment(number, rival)
+        super().comment(number, body)
+
+
+def test_two_runs_racing_for_one_approval_only_the_first_proceeds(env: dict[str, Any]) -> None:
+    gh = RacingGitHub(issue_body(env["sha"]))
+    with pytest.raises(pilot.PilotError, match="another run reserved this approval first"):
+        pilot.authorize(run_for(env["sha"]), env["root"], env["cfg"], gh, CONTRACT)
+    records = ledger.parse(gh.posted)
+    assert [r.data["run_id"] for r in records] == ["999", "100"]
+    assert ledger.spent(records, records[0].data["contract"]) == pytest.approx(5.5)  # both count
+    with pytest.raises(pilot.PilotError, match="another run"):
+        pilot.require_reservation(run_for(env["sha"]), env["root"], env["cfg"], gh, CONTRACT)
+    pilot.require_reservation(
+        run_for(env["sha"], run_id="999"), env["root"], env["cfg"], gh, CONTRACT
+    )
+
+
+def test_equal_timestamps_are_ordered_by_comment_id() -> None:
+    at = "2026-11-01T11:00:00Z"
+    a = reserve(at, run_id="2") | {"id": 20}
+    b = reserve(at, run_id="1") | {"id": 10}
+    first = ledger.first_after(
+        ledger.parse([a, b]), "D", datetime.fromisoformat("2026-11-01T10:00:00+00:00")
+    )
+    assert first is not None and first.data["run_id"] == "1"
+
+
+def test_an_edited_ledger_record_refuses() -> None:
+    edited = reserve("2026-11-01T11:00:00Z") | {"updated_at": "2026-11-01T12:00:00Z"}
+    with pytest.raises(ledger.LedgerError, match="edited"):
+        ledger.parse([edited])
+
+
+def test_the_pilot_runs_on_a_pinned_runner_image(wf: dict[str, Any]) -> None:
+    assert {job["runs-on"] for job in wf["jobs"].values()} == {"ubuntu-24.04"}
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("- tests/test_demo_counts.py", "- tests/test_demo_count.py"),  # scope
+        ("- verify\n- pytest", "- pytest"),  # a criterion dropped (and verify gone)
+        ("- pytest tests/test_demo_counts.py", "- pytest tests/test_other.py"),  # criterion target
+        ("asserted separately", "asserted together"),  # manual criterion wording
+        ("Report both sets of", "Ignore both sets of"),  # stop condition meaning
+        ("166 events", "1 66 events"),  # whitespace that splits a token is material
+        ("20\nviolations", "2O\nviolations"),  # lookalike character
+        ("Pinning would_block", "Pinning​would_block"),  # zero-width character
+        ("1. Public demo readiness / deployment", "2. Code-review / demo documentation"),
+    ],
+)
+def test_normalisation_never_hides_a_material_change(old: str, new: str) -> None:
+    cfg = config.load()
+    text = (REPO_ROOT / CONTRACT).read_text(encoding="utf-8")
+    assert old in text, old
+    original = contract.digest(contract.parse(text, cfg))
+    try:
+        changed = contract.digest(contract.parse(text.replace(old, new, 1), cfg))
+    except contract.ContractError:
+        return  # rejected outright is also not a silent match
+    assert changed != original
+
+
+def test_criteria_order_is_part_of_what_was_approved() -> None:
+    cfg = config.load()
+    text = (REPO_ROOT / CONTRACT).read_text(encoding="utf-8")
+    swapped = text.replace(
+        "- verify\n- pytest tests/test_demo_counts.py",
+        "- pytest tests/test_demo_counts.py\n- verify",
+    )
+    assert swapped != text
+    assert contract.digest(contract.parse(swapped, cfg)) != contract.digest(
+        contract.parse(text, cfg)
+    )

@@ -40,6 +40,7 @@ class Record:
     kind: str
     at: datetime
     data: dict[str, Any]
+    id: int = 0  # comment id: breaks ties between equal timestamps
 
 
 def _at(ts: str) -> datetime:
@@ -81,7 +82,10 @@ def parse(comments: list[dict[str, Any]]) -> list[Record]:
             data = None
         if not isinstance(data, dict) or data.get("type") not in ("reserve", "account"):
             raise LedgerError(f"unreadable ledger record in comment at {c.get('created_at')}")
-        out.append(Record(data["type"], _at(str(c["created_at"])), data))
+        # the bot never edits a record; an edited one has been tampered with
+        if c.get("updated_at", c["created_at"]) != c["created_at"]:
+            raise LedgerError(f"ledger record at {c['created_at']} was edited after it was written")
+        out.append(Record(data["type"], _at(str(c["created_at"])), data, int(c.get("id") or 0)))
     return out
 
 
@@ -143,6 +147,29 @@ def start_problems(
             f"an attempt needs ${need:.2f}"
         )
     return problems
+
+
+def first_after(
+    records: list[Record], contract_sha256: str, approved_at: datetime
+) -> Record | None:
+    """The reservation that owns this approval. Two runs that both passed
+    start_problems before either wrote (pilot/N and pilot-drill/N don't share a
+    concurrency group) resolve here: the earliest wins, the other refuses, and
+    both still count as spent."""
+    candidates = [
+        r
+        for r in records
+        if r.kind == "reserve" and r.data.get("contract") == contract_sha256 and r.at > approved_at
+    ]
+    return min(candidates, key=lambda r: (r.at, r.id), default=None)
+
+
+def owns(record: Record | None, run_id: str, attempt: str, base: str) -> bool:
+    return (
+        record is not None
+        and _key(record.data) == (run_id, attempt)
+        and record.data.get("base") == base
+    )
 
 
 def reservation(cfg: Config, contract_sha256: str, base: str, run_id: str, attempt: str) -> str:
