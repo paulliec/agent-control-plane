@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from scripts.harness import config, contract, gate, ledger, scope
+from scripts.harness import confidential, config, contract, gate, ledger, scope
 from scripts.harness.config import REPO_ROOT, Config
 
 ISSUE_REF = re.compile(r"^refs/heads/(pilot|pilot-drill)/([1-9][0-9]{0,6})$")
@@ -236,14 +236,13 @@ def authorize(run: Run, root: Path, cfg: Config, gh: GitHub, contract_path: str)
 
 def require_reservation(
     run: Run, root: Path, cfg: Config, gh: GitHub, contract_path: str
-) -> tuple[contract.Contract, str]:
+) -> tuple[contract.Contract, str, list[ledger.Record]]:
     task, digest, issue = trust(run, root, cfg, gh, contract_path)
-    problems = _owner_check(
-        ledger.parse(gh.comments(run.issue)), digest, approved_at(issue, cfg), run
-    )
+    records = ledger.parse(gh.comments(run.issue))
+    problems = _owner_check(records, digest, approved_at(issue, cfg), run)
     if problems:
         raise PilotError(problems)
-    return task, digest
+    return task, digest, records
 
 
 def engine_env(engine: str) -> dict[str, str]:
@@ -269,7 +268,9 @@ def run_engine(
     budget_usd: float,
     tools: str,
     schema: Path | None = None,
-) -> int:
+) -> tuple[int, str]:
+    """Exit code and captured output. Nothing the engine prints reaches the job
+    log directly: it goes through engine_summary, redacted, or nowhere."""
     settings = REPO_ROOT / ".claude/harness/settings.json"  # the trusted copy, not the clone's
     args = [role, str(workdir), str(prompt), str(out), str(turns), f"{budget_usd:.2f}", tools]
     args += [str(settings), str(schema or "")]
@@ -279,7 +280,64 @@ def run_engine(
         cmd = [sys.executable, "-m", "scripts.harness.engines.fake", *args]
     else:
         raise PilotError([f"unknown engine {engine!r}"])
-    return subprocess.run(cmd, cwd=REPO_ROOT, env=engine_env(engine), timeout=45 * 60).returncode
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            env=engine_env(engine),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=45 * 60,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "engine timed out"
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _cost(v: Any) -> float | None:
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) and v >= 0 else None
+
+
+def engine_summary(raw: Path, code: int, output: str) -> dict[str, Any]:
+    """The only record of an engine run that leaves the job: allow-listed fields,
+    redacted. Complete means a zero exit AND a parseable result that says it
+    finished successfully; budget or turn exhaustion, malformed output and
+    errors are all incomplete."""
+    try:
+        data = json.loads(raw.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    summary: dict[str, Any] = {"exit_code": code, "output_tail": output.splitlines()[-20:]}
+    reason: str | None
+    if not isinstance(data, dict):
+        reason = "engine output missing or unreadable"
+    else:
+        summary.update(
+            subtype=data.get("subtype"),
+            is_error=data.get("is_error"),
+            num_turns=data.get("num_turns"),
+            total_cost_usd=_cost(data.get("total_cost_usd")),
+            permission_denials=[
+                str(d.get("tool_name"))
+                for d in data.get("permission_denials") or []
+                if isinstance(d, dict)
+            ],
+            result=str(data.get("result", ""))[:4000],
+        )
+        if code != 0:
+            reason = f"engine exited {code}"
+        elif data.get("subtype") != "success":
+            reason = f"engine did not complete: {data.get('subtype')!r}"
+        elif data.get("is_error") is not False:
+            reason = "engine reported an error"
+        else:
+            reason = None
+    summary["complete"] = reason is None
+    if reason:
+        summary["reason"] = reason
+    redacted: dict[str, Any] = confidential.redact_obj(summary)
+    return redacted
 
 
 def implementer_prompt(contract_text: str) -> str:
@@ -300,7 +358,7 @@ def _write(path: Path, data: dict[str, Any]) -> None:
 def agent(
     run: Run, root: Path, cfg: Config, gh: GitHub, contract_path: str, out: Path
 ) -> dict[str, Any]:
-    _, digest = require_reservation(run, root, cfg, gh, contract_path)
+    _, digest, _ = require_reservation(run, root, cfg, gh, contract_path)
     assert cfg.budget is not None
     out.mkdir(parents=True, exist_ok=True)
     gitdir, work = out / "agent.git", out / "work"
@@ -321,16 +379,15 @@ def agent(
     prompt.write_text(
         implementer_prompt((root / contract_path).read_text(encoding="utf-8")), encoding="utf-8"
     )
-    code = run_engine(
-        run.engine,
-        "implementer",
-        work,
-        prompt,
-        out / "implementer-run.json",
-        cfg.max_turns,
-        cfg.budget.implementer_usd,
-        IMPLEMENTER_TOOLS,
-    )
+    raw = out / "implementer-run.json"
+    code, output = run_engine(
+        run.engine, "implementer", work, prompt, raw,
+        cfg.max_turns, cfg.budget.implementer_usd, IMPLEMENTER_TOOLS,
+    )  # fmt: skip
+    summary = engine_summary(raw, code, output)
+    raw.unlink(missing_ok=True)  # the sanitised summary is the only copy that survives
+    summary_path = out / "implementer-summary.json"
+    _write(summary_path, summary)
 
     result: dict[str, Any] = {
         "issue": run.issue,
@@ -338,13 +395,22 @@ def agent(
         "branch": run.branch,
         "contract_sha256": digest,
         "engine": run.engine,
-        "engine_exit": code,
+        "engine_complete": summary["complete"],
+        "summary_sha256": gate.sha256_file(summary_path),
     }
-    scope.git(root, *g, "add", "-A")
-    if not scope.git(root, *g, "diff", "--cached", "--name-only"):
-        result["status"] = "no_changes"
+
+    def finish(status: str, **extra: Any) -> dict[str, Any]:
+        result.update(status=status, **extra)
         _write(out / "agent.json", result)
         return result
+
+    # an incomplete run (budget or turns exhausted, crashed, garbled) is never
+    # committed: its partial edits stay on this runner, unbundled
+    if not summary["complete"]:
+        return finish("engine_incomplete", reason=summary.get("reason"))
+    scope.git(root, *g, "add", "-A")
+    if not scope.git(root, *g, "diff", "--cached", "--name-only"):
+        return finish("no_changes")
     identity = [
         "-c",
         "user.name=acp-harness",
@@ -353,6 +419,18 @@ def agent(
     ]
     scope.git(root, *g, *identity, "commit", "-q", "-m", f"agent: task #{run.issue}")
     tip = scope.git(root, *g, "rev-parse", "HEAD")[0]
+
+    # Trusted pre-upload scan: nothing secret-shaped, and no value of a credential
+    # this job holds, may reach an artifact. check repeats the pattern scan
+    # independently; this one runs before anything leaves the runner.
+    history = subprocess.run(
+        ["git", "--git-dir", str(gitdir), "log", "-p", "--text", "--no-renames", "--no-color",
+         "--format=", f"{run.sha}..{tip}"],
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).stdout  # fmt: skip
+    if hits := confidential.findings(history):
+        return finish("confidentiality_blocked", findings=hits)
+
     bundle = out / "agent.bundle"
     scope.git(
         root,
@@ -364,9 +442,7 @@ def agent(
         str(bundle),
         f"{run.sha}..{run.branch}",
     )
-    result.update(status="committed", tip=tip, bundle_sha256=gate.sha256_file(bundle))
-    _write(out / "agent.json", result)
-    return result
+    return finish("committed", tip=tip, bundle_sha256=gate.sha256_file(bundle))
 
 
 def check(
@@ -453,6 +529,34 @@ def review_prompt(contract_text: str, diff: str, gate_check: str, criteria: str)
     )
 
 
+def reported_cost(summary: Path) -> float | None:
+    try:
+        return _cost(json.loads(summary.read_text(encoding="utf-8")).get("total_cost_usd"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def review_budget(
+    records: list[ledger.Record], digest: str, run: Run, cfg: Config, implementer_cost: float | None
+) -> dict[str, Any]:
+    """What this attempt may still spend on review, reconciled against reality:
+    every other attempt as the ledger counts it, plus this implementer's actual
+    reported cost, or its full allocation when it reported none."""
+    assert cfg.budget is not None
+    prior = ledger.spent(records, digest, exclude=(run.run_id, run.attempt))
+    impl = implementer_cost if implementer_cost is not None else cfg.budget.implementer_usd
+    remaining = cfg.budget.task_usd - prior - impl
+    return {
+        "task_usd": cfg.budget.task_usd,
+        "prior_usd": round(prior, 4),
+        "implementer_usd": round(impl, 4),
+        "implementer_cost_known": implementer_cost is not None,
+        "remaining_usd": round(remaining, 4),
+        "reviewer_allocation_usd": cfg.budget.reviewer_usd,
+        "sufficient": remaining >= cfg.budget.reviewer_usd,
+    }
+
+
 def review(
     run: Run,
     root: Path,
@@ -463,12 +567,28 @@ def review(
     expected: dict[str, str],
     out: Path,
 ) -> dict[str, Any]:
-    require_reservation(run, root, cfg, gh, contract_path)
+    _, digest, records = require_reservation(run, root, cfg, gh, contract_path)
     assert cfg.budget is not None
-    for name, want in expected.items():  # every input bound to what check/criteria produced
+    for name, want in expected.items():  # every input bound to what earlier jobs recorded
         if gate.sha256_file(evidence / name) != want:
             raise PilotError([f"{name} does not match the digest recorded upstream"])
+    if "implementer-summary.json" not in expected:
+        raise PilotError(["the implementer's cost record must be digest-bound before review"])
     out.mkdir(parents=True, exist_ok=True)
+
+    budget = review_budget(
+        records, digest, run, cfg, reported_cost(evidence / "implementer-summary.json")
+    )
+    result: dict[str, Any] = {"budget": budget, "engine_invoked": False, "verdict": None}
+    if not budget["sufficient"]:
+        result["problems"] = [
+            f"insufficient budget for review: ${budget['remaining_usd']:.2f} left, "
+            f"${cfg.budget.reviewer_usd:.2f} needed; no reviewer was run"
+        ]
+        result["accepted"] = False
+        _write(out / "review.json", result)
+        return result
+
     gate._import_bundle(root, evidence / "agent.bundle", run.branch)
     work = gate.materialize(root, gate.CANDIDATE_REF, out / "review-work")
     text = {
@@ -487,44 +607,67 @@ def review(
     )
     schema = out / "review-schema.json"
     schema.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
-    run_engine(
+    raw = out / "reviewer-run.json"
+    code, output = run_engine(
         run.engine,
         "reviewer",
         work,
         prompt,
-        out / "reviewer-run.json",
+        raw,
         cfg.reviewer_max_turns,
         cfg.budget.reviewer_usd,
         REVIEWER_TOOLS,
         schema,
     )
-    verdict = structured_output(out / "reviewer-run.json")
-    result = {"verdict": verdict, "problems": review_problems(verdict)}
-    result["accepted"] = not result["problems"]
+    summary = engine_summary(raw, code, output)
+    verdict = structured_output(raw) if summary["complete"] else None
+    raw.unlink(missing_ok=True)
+    _write(out / "reviewer-summary.json", summary)
+
+    problems = review_problems(verdict)
+    if not summary["complete"]:
+        problems.insert(0, f"reviewer engine incomplete: {summary.get('reason')}")
+    result.update(
+        engine_invoked=True,
+        engine_complete=summary["complete"],
+        verdict=confidential.redact_obj(verdict),
+        problems=problems,
+        accepted=not problems,
+    )
     _write(out / "review.json", result)
     return result
 
 
-def reported_cost(run_json: Path) -> float | None:
-    try:
-        v = json.loads(run_json.read_text(encoding="utf-8")).get("total_cost_usd")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None
-    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) and v >= 0 else None
-
-
 def account(run: Run, gh: GitHub, evidence: Path, review_result: str) -> str:
-    impl = reported_cost(evidence / "implementer-run.json")
-    rev: float | str | None = reported_cost(evidence / "reviewer-run.json")
-    if rev is None and review_result == "skipped":
+    impl = reported_cost(evidence / "implementer-summary.json")
+    rev: float | str | None = reported_cost(evidence / "reviewer-summary.json")
+    if rev is None and (review_result == "skipped" or _not_invoked(evidence)):
         rev = "not_run"
     body = ledger.account(run.run_id, run.attempt, impl, rev)
     gh.comment(run.issue, body)
     return body
 
 
-def verdict(evidence: Path, expected: dict[str, str]) -> dict[str, Any]:
+def _not_invoked(evidence: Path) -> bool:
+    try:
+        data = json.loads((evidence / "review.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("engine_invoked") is False
+
+
+def verdict(
+    evidence: Path,
+    expected: dict[str, str],
+    *,
+    cfg: Config | None = None,
+    records: list[ledger.Record] | None = None,
+    run: Run | None = None,
+    review_result: str = "",
+) -> dict[str, Any]:
     """Everything a human needs to decide on, and whether it is ready for them."""
+    cfg = cfg or config.load()
+    assert cfg.budget is not None
 
     def load(name: str) -> dict[str, Any]:
         # an empty expected digest means that stage never ran: its evidence counts as absent,
@@ -534,14 +677,21 @@ def verdict(evidence: Path, expected: dict[str, str]) -> dict[str, Any]:
             return {}
         if name in expected and (not p.exists() or gate.sha256_file(p) != expected[name]):
             raise PilotError([f"{name} is missing or does not match its recorded digest"])
-        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        return data if isinstance(data, dict) else {}
 
-    agent_r, check_r, crit_r, rev_r = (
-        load(n) for n in ("agent.json", "gate-check.json", "criteria.json", "review.json")
-    )
+    agent_r = load("agent.json")
+    check_r = load("gate-check.json")
+    crit_r = load("criteria.json")
+    rev_r = load("review.json")
+    impl_s = load("implementer-summary.json")
+    rev_s = load("reviewer-summary.json")
+
     problems = []
     if agent_r.get("status") != "committed":
         problems.append(f"implementer produced {agent_r.get('status', 'nothing')}")
+    if agent_r.get("engine_complete") is not True:
+        problems.append("implementer engine did not complete successfully")
     if not check_r.get("ok"):
         problems.append("trusted check did not pass")
     if not (crit_r.get("ok") and crit_r.get("criteria_run")):
@@ -554,17 +704,36 @@ def verdict(evidence: Path, expected: dict[str, str]) -> dict[str, Any]:
         problems.append(
             "reviewer did not accept: " + "; ".join(rev_r.get("problems", ["no review"]))
         )
-    manual = (
-        (rev_r.get("verdict") or {}).get("manual_criteria", [])
-        if isinstance(rev_r.get("verdict"), dict)
-        else []
-    )
+    if rev_r.get("engine_invoked") and rev_r.get("engine_complete") is not True:
+        problems.append("reviewer engine did not complete successfully")
+
+    # final cumulative spend, conservative: unknown costs count at their allocation
+    digest = str(agent_r.get("contract_sha256", ""))
+    exclude = (run.run_id, run.attempt) if run else None
+    prior = ledger.spent(records or [], digest, exclude=exclude)
+    impl = _cost(impl_s.get("total_cost_usd"))
+    rev = _cost(rev_s.get("total_cost_usd"))
+    reviewer_ran = rev_r.get("engine_invoked") is not False and review_result != "skipped"
+    spent = prior + (impl if impl is not None else cfg.budget.implementer_usd)
+    spent += rev if rev is not None else (cfg.budget.reviewer_usd if reviewer_ran else 0.0)
+    budget = {
+        "task_usd": cfg.budget.task_usd,
+        "spent_usd": round(spent, 4),
+        "prior_usd": round(prior, 4),
+        "costs_known": impl is not None and (rev is not None or not reviewer_ran),
+        "over_budget": spent > cfg.budget.task_usd + 1e-9,
+    }
+    if budget["over_budget"]:
+        problems.append(f"budget overrun: ${spent:.2f} counted against ${cfg.budget.task_usd:.2f}")
+    verdict_obj = rev_r.get("verdict")
+    manual = verdict_obj.get("manual_criteria", []) if isinstance(verdict_obj, dict) else []
     return {
         "ready_for_human": not problems,
         "problems": problems,
         "tip": check_r.get("tip"),
         "bundle_sha256": check_r.get("bundle_sha256"),
         "contract_sha256": check_r.get("contract_sha256"),
+        "budget": budget,
         "manual_criteria_for_human": manual,
     }
 
@@ -600,6 +769,7 @@ def main(argv: list[str] | None = None) -> int:
             res = authorize(run, REPO_ROOT, cfg, gh, args.contract)
         elif args.stage == "agent":
             res = agent(run, REPO_ROOT, cfg, gh, args.contract, args.out)
+            res["agent_sha256"] = gate.sha256_file(args.out / "agent.json")
         elif args.stage == "check":
             res = check(
                 run,
@@ -634,14 +804,23 @@ def main(argv: list[str] | None = None) -> int:
             res = {"ok": rep["ok"], "criteria_sha256": gate.sha256_file(args.out / "criteria.json")}
         elif args.stage == "review":
             res = review(run, REPO_ROOT, cfg, gh, args.contract, args.evidence, expected, args.out)
+            summary = args.out / "reviewer-summary.json"
             res = {
                 "accepted": res["accepted"],
                 "review_sha256": gate.sha256_file(args.out / "review.json"),
+                "summary_sha256": gate.sha256_file(summary) if summary.exists() else "",
             }
         elif args.stage == "account":
             res = {"recorded": account(run, gh, args.evidence, args.review_result)}
         else:
-            res = verdict(args.evidence, expected)
+            res = verdict(
+                args.evidence,
+                expected,
+                cfg=cfg,
+                records=ledger.parse(gh.comments(run.issue)),
+                run=run,
+                review_result=args.review_result,
+            )
     except (PilotError, gate.GateError, ledger.LedgerError, contract.ContractError, KeyError) as e:
         print(json.dumps({"ok": False, "error": str(e)}, indent=2))
         return 1

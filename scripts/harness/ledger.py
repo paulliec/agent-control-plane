@@ -106,9 +106,17 @@ def _cost(v: Any, allocation: float) -> float:
     return allocation
 
 
-def spent(records: list[Record], contract_sha256: str) -> float:
+def spent(
+    records: list[Record], contract_sha256: str, exclude: tuple[str, str] | None = None
+) -> float:
+    """Counted spend for a contract; `exclude` leaves out one (run_id, attempt),
+    so a running attempt can add its own live figures instead of its reservation."""
     reservations = [
-        r for r in records if r.kind == "reserve" and r.data.get("contract") == contract_sha256
+        r
+        for r in records
+        if r.kind == "reserve"
+        and r.data.get("contract") == contract_sha256
+        and _key(r.data) != exclude
     ]
     accounts = {_key(r.data): r.data for r in records if r.kind == "account"}
     total = 0.0

@@ -151,6 +151,12 @@ full $2.75. A missing, negative or non-numeric cost counts at its allocation.
 accounting durable. Only comments by `github-actions[bot]` count. A malformed
 bot record, or comments that can't be read, refuse the run.
 
+**Runtime reconciliation.** `review` recomputes what's left before it pays for
+a reviewer: task budget, minus every other attempt as the ledger counts it,
+minus this implementer's reported cost (its full $2.00 if unreported). Less
+than $0.75 left means no reviewer is run. `verdict` reports final cumulative
+spend and refuses readiness on any overrun.
+
 **Overshoot exposure.** With $2.75 reserved and $0.25 of headroom in the task
 budget, the worst case per attempt is $2.75 plus about one turn each for the
 implementer and the reviewer. After that the ledger refuses further attempts,
@@ -297,12 +303,12 @@ on a branch any workflow runs from.
 | Job | Token | Secret | Runs candidate code | Does |
 |---|---|---|---|---|
 | `authorize` | contents read, issues write | none | no | Trust anchor; ledger check; posts the **reservation** |
-| `agent` | contents read, issues read | model key (`acp-agent` approval) | **no**: tools are Read/Edit/Write/Grep/Glob only | The engine edits a separate clone. Trusted code commits with an external git dir, hooks and fsmonitor off, then bundles. The engine's environment is scrubbed (no `GH_TOKEN`) |
+| `agent` | contents read, issues read | model key (`acp-agent` approval) | **no**: tools are Read/Edit/Write/Grep/Glob only | The engine edits a separate clone, with a scrubbed environment (no `GH_TOKEN`). Its run must be **complete**: exit 0 and a result reporting `success`. Budget or turn exhaustion, malformed output or an error means `engine_incomplete`, with nothing committed or bundled. Trusted code commits with an external git dir (hooks and fsmonitor off), runs the **pre-upload confidentiality scan**, and only then bundles. Uploads only the sanitised summary, never the raw transcript |
 | `check` | contents read | none | no | **Trusted verdict**: pinned base, bundle digest and tip bound, ancestry, no merges, `agent/*`, scope on every commit, secret scan of every added line |
-| `criteria` | contents read | none | **yes, in a container** | Wheelhouse built from the base's `pyproject.toml`. Then `trusted_baseline` (base tests) and `candidate_authored` (contract criteria), each in its own fresh clone and container |
-| `review` | contents read, issues read | model key (`acp-agent` approval) | no | Reviewer with Read/Grep/Glob only, under `--json-schema`. Gets the contract, diff and labelled evidence, all digest-checked, but never the implementer's transcript |
+| `criteria` | contents read | none | **yes, in a container** | Wheelhouse built from the base's `pyproject.toml`. Then `trusted_baseline` (base tests), and each `candidate_authored` criterion, each in **its own fresh clone** and container, so no criterion can alter the tree another judges |
+| `review` | contents read, issues read | model key (`acp-agent` approval) | no | **Reconciles budget first.** If less than the reviewer's full allocation remains after earlier attempts and the implementer's actual cost (or its full allocation when unreported), no reviewer is run. Otherwise: Read/Grep/Glob only, under `--json-schema`, given the contract, diff and labelled evidence, all digest-checked, never the implementer's transcript. An incomplete reviewer run is never an approval |
 | `account` | contents read, issues write | none | no | Settles the reservation with reported costs |
-| `verdict` | contents read | none | no | `ready_for_human` only if every stage passed and every digest matches |
+| `verdict` | contents read, issues read | none | no | `ready_for_human` only if every stage passed, both engines completed, every digest matches, and **final cumulative spend** (earlier attempts plus this one, unknown costs at full allocation) is within the task budget. Spend and overrun status are always reported |
 
 **Container** (`sandbox.py`):
 - `--network none`;
@@ -319,10 +325,26 @@ on a branch any workflow runs from.
 later job refuses a bundle or evidence file whose sha256 differs from the value
 recorded upstream.
 
+**Confidentiality before upload.** Nothing leaves the agent job until trusted
+code has checked it:
+- Every line the candidate's commits add is scanned for secret-shaped strings
+  (including the drill canary) and for the literal value of any credential the
+  job holds. A hit means `confidentiality_blocked`: no bundle, and only pattern
+  names recorded.
+- Engine output is reduced to allow-listed fields, then redacted. The raw
+  transcript is deleted.
+- Engine stdout and stderr are captured, never streamed to the job log.
+
+`check`'s independent scan of the bundle remains.
+
 **Publication.** None. The output is `agent.bundle` plus evidence. Paul
 publishes by hand (see the pilot sequence below).
 
 ### What the runner relies on GitHub to enforce
+
+**For P1, credential release is a human decision, not an automated one.** The
+harness checks are necessary but not sufficient. Before approving `acp-agent`,
+Paul verifies the pinned commit and the workflow it runs.
 
 The trust checks in `pilot.py` run *inside* the workflow, so they protect only a
 workflow that calls them. Someone who can push a `pilot/*` branch can push a
@@ -353,7 +375,9 @@ workflow doesn't trigger on.
 
 ### Ledger integrity
 
-- **Concurrent runs.** `pilot/7` and `pilot-drill/7` don't share a concurrency
+- **Concurrent runs.** All pilot runs, real and drill, share one repository-wide
+  concurrency group (`acp-pilot`), so they queue. Underneath that, as defence in
+  depth: `pilot/7` and `pilot-drill/7` once didn't share a concurrency
   group. If both reserve against one approval, the earliest reservation
   (timestamp, then comment ID) proceeds and the other refuses. Both count as
   spent.
@@ -403,11 +427,11 @@ The suite's coverage figure (97.62%, floor 96%) measures only the
 `agent_control_plane` package. Measured separately with
 `pytest tests/test_harness*.py --cov=scripts/harness --cov-fail-under=0`,
 harness coverage is **85%**:
-- `ledger.py` and `scope.py`: 100%
+- `ledger.py`, `scope.py` and `confidential.py`: 100%
 - `gate.py` and `guard.py`: 98%
 - `config.py`: 92%
 - `contract.py`: 80%
-- `pilot.py`: 76%
+- `pilot.py`: 79%
 - `sandbox.py`: 71%
 - `fake.py`: 0%
 
@@ -473,10 +497,14 @@ reason, and spend no money:
    `docs/harness/pilot-demo-counts.md` and set **Pinned base** = H. Then apply
    `acp:approved`.
 2. Push the trigger: `git push origin H:refs/heads/pilot/N`.
-3. Approve `acp-agent` for `agent`, and later for `review`. Watch the run.
+3. Approve `acp-agent` for `agent`, and later for `review`, **only** after
+   checking against the approval checklist that the run's commit is H and that
+   `authorize` passed in that run. Watch the run.
 4. Read `verdict`, which shows `ready_for_human`, the problems, and the manual
-   criteria. Read the evidence artifacts: `gate-check.json`, `diff.patch`,
-   `criteria.json`, `review.json` and `implementer-run.json`.
+   criteria, plus final spend and overrun status. Read the evidence artifacts:
+   `gate-check.json`, `diff.patch`, `criteria.json`, `review.json`, and the
+   sanitised `implementer-summary.json` / `reviewer-summary.json`. The raw
+   transcripts are never uploaded.
 
 **E. Human publication.** Only if satisfied:
 ```

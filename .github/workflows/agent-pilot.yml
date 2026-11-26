@@ -19,9 +19,11 @@ on:
 
 permissions: {}
 
-# duplicate pushes queue; they never run side by side
+# One pilot at a time across the repository, real and drill alike: pushes
+# queue and never run side by side. The ledger's earliest-reservation rule
+# stays underneath as defence in depth.
 concurrency:
-  group: acp-pilot-${{ github.ref }}
+  group: acp-pilot
   cancel-in-progress: false
 
 env:
@@ -66,6 +68,8 @@ jobs:
       status: ${{ steps.agent.outputs.status }}
       tip: ${{ steps.agent.outputs.tip }}
       bundle_sha256: ${{ steps.agent.outputs.bundle_sha256 }}
+      summary_sha256: ${{ steps.agent.outputs.summary_sha256 }}
+      agent_sha256: ${{ steps.agent.outputs.agent_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -91,7 +95,7 @@ jobs:
           path: |
             ${{ env.OUT }}/agent.json
             ${{ env.OUT }}/agent.bundle
-            ${{ env.OUT }}/implementer-run.json
+            ${{ env.OUT }}/implementer-summary.json
           if-no-files-found: warn
           retention-days: 90
 
@@ -191,6 +195,7 @@ jobs:
     outputs:
       accepted: ${{ steps.review.outputs.accepted }}
       review_sha256: ${{ steps.review.outputs.review_sha256 }}
+      summary_sha256: ${{ steps.review.outputs.summary_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -218,6 +223,7 @@ jobs:
           --expect "gate-check.json=${{ needs.check.outputs.gate_sha256 }}"
           --expect "diff.patch=${{ needs.check.outputs.diff_sha256 }}"
           --expect "criteria.json=${{ needs.criteria.outputs.criteria_sha256 }}"
+          --expect "implementer-summary.json=${{ needs.agent.outputs.summary_sha256 }}"
         env:
           GH_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -228,7 +234,7 @@ jobs:
           name: review-${{ github.run_attempt }}
           path: |
             ${{ env.OUT }}/review.json
-            ${{ env.OUT }}/reviewer-run.json
+            ${{ env.OUT }}/reviewer-summary.json
           if-no-files-found: warn
           retention-days: 90
 
@@ -269,6 +275,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: read  # the ledger, for final cumulative spend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -287,7 +294,13 @@ jobs:
       - shell: bash
         run: >-
           python -m scripts.harness.pilot verdict --evidence "$EVIDENCE"
+          --expect "agent.json=${{ needs.agent.outputs.agent_sha256 }}"
+          --expect "implementer-summary.json=${{ needs.agent.outputs.summary_sha256 }}"
           --expect "gate-check.json=${{ needs.check.outputs.gate_sha256 }}"
           --expect "criteria.json=${{ needs.criteria.outputs.criteria_sha256 }}"
           --expect "review.json=${{ needs.review.outputs.review_sha256 }}"
+          --expect "reviewer-summary.json=${{ needs.review.outputs.summary_sha256 }}"
+          --review-result "${{ needs.review.result }}"
           | tee "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}

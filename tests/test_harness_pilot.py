@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 import yaml
-from scripts.harness import config, contract, gate, ledger, pilot, sandbox
+from scripts.harness import confidential, config, contract, gate, ledger, pilot, sandbox
 from scripts.harness.config import REPO_ROOT, Budget
 
 CONTRACT = "docs/harness/pilot-demo-counts.md"
@@ -352,6 +352,12 @@ def run_agent(
     return pilot.agent(run, env["root"], env["cfg"], gh, CONTRACT, out), gh, out
 
 
+def uploadable(out: Path) -> list[Path]:
+    """Exactly what the agent job's upload step can pick up."""
+    names = ("agent.json", "agent.bundle", "implementer-summary.json")
+    return [out / n for n in names if (out / n).exists() and n != "agent.bundle"]
+
+
 def test_the_engine_gets_no_github_token_or_host_secrets(
     env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -360,10 +366,13 @@ def test_the_engine_gets_no_github_token_or_host_secrets(
     monkeypatch.setenv("ACTIONS_RUNTIME_TOKEN", "runtime")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "z" * 30)  # not for the fake engine either
     monkeypatch.setenv("ACP_HOST_CANARY", CANARY)
-    res, _, out = run_agent(
-        env, monkeypatch, writes={"tests/test_demo_counts.py": "def test_x():\n    pass\n"}
-    )
-    seen = set(json.loads((out / "implementer-run.json").read_text())["env_names"])
+    monkeypatch.setenv("AEH_FAKE_SCRIPT", str(fake_script(env["tmp"], "probe")))
+    work, raw, prompt = env["tmp"] / "w", env["tmp"] / "raw.json", env["tmp"] / "p.md"
+    work.mkdir()
+    prompt.write_text("x")
+    code, _ = pilot.run_engine("fake", "implementer", work, prompt, raw, 1, 0.1, "Read")
+    seen = set(json.loads(raw.read_text())["env_names"])  # what the engine process really had
+    assert code == 0
     assert not seen & {
         "GH_TOKEN",
         "GITHUB_TOKEN",
@@ -371,7 +380,13 @@ def test_the_engine_gets_no_github_token_or_host_secrets(
         "ANTHROPIC_API_KEY",
         "ACP_HOST_CANARY",
     }
+    # and through the agent stage, the raw transcript doesn't outlive the summary
+    res, _, out = run_agent(
+        env, monkeypatch, writes={"tests/test_demo_counts.py": "def test_x():\n    pass\n"}
+    )
     assert res["status"] == "committed"
+    assert not (out / "implementer-run.json").exists()
+    assert (out / "implementer-summary.json").exists()
 
 
 def test_the_engine_never_writes_the_trusted_checkout(
@@ -402,7 +417,7 @@ def test_hooks_in_the_agent_git_dir_never_run(
     monkeypatch.setenv("AEH_FAKE_SCRIPT", str(fake_script(env["tmp"], "impl", **script)))
     real = pilot.run_engine
 
-    def engine_then_plant(*args: Any, **kw: Any) -> int:
+    def engine_then_plant(*args: Any, **kw: Any) -> tuple[int, str]:
         code = real(*args, **kw)
         hooks.mkdir(parents=True, exist_ok=True)
         (hooks / "pre-commit").write_text(f"#!/bin/sh\necho ran > '{marker.as_posix()}'\n")
@@ -477,9 +492,24 @@ def test_protected_and_out_of_scope_edits_fail_the_check(
     assert report["ok"] is False
 
 
-def test_a_secret_written_into_the_candidate_fails_the_check(
+def test_a_secret_written_into_the_candidate_never_reaches_a_bundle(
     env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    res, _, out = run_agent(
+        env, monkeypatch, writes={"tests/test_demo_counts.py": f"KEY = '{CANARY}'\n"}
+    )
+    assert res["status"] == "confidentiality_blocked"
+    assert res["findings"] == ["harness-canary"]
+    assert not (out / "agent.bundle").exists()
+    for f in uploadable(out):
+        assert CANARY not in f.read_text(encoding="utf-8"), f.name
+
+
+def test_the_downstream_check_catches_a_secret_on_its_own(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # disable the pre-upload scan to prove check doesn't depend on it
+    monkeypatch.setattr(confidential, "findings", lambda text, env=None: [])
     res, _, out = run_agent(
         env, monkeypatch, writes={"tests/test_demo_counts.py": f"KEY = '{CANARY}'\n"}
     )
@@ -655,9 +685,16 @@ def review_setup(
         shutil.copy(f, ev / f.name)
     (ev / "criteria.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
     (ev / "implementer-run.json").write_text(json.dumps({"result": "IMPLEMENTER-NARRATIVE-7f3"}))
+    shutil.copy(out / "implementer-summary.json", ev / "implementer-summary.json")
     expected = {
         n: gate.sha256_file(ev / n)
-        for n in ("agent.bundle", "gate-check.json", "diff.patch", "criteria.json")
+        for n in (
+            "agent.bundle",
+            "gate-check.json",
+            "diff.patch",
+            "criteria.json",
+            "implementer-summary.json",
+        )
     }
     monkeypatch.setenv(
         "AEH_FAKE_SCRIPT",
@@ -716,7 +753,14 @@ def test_account_records_missing_costs_as_unknown_and_skipped_review_as_not_run(
 def evidence(tmp: Path, **override: dict[str, Any]) -> tuple[Path, dict[str, str]]:
     tip = "c" * 40
     files = {
-        "agent.json": {"status": "committed", "tip": tip},
+        "agent.json": {
+            "status": "committed",
+            "tip": tip,
+            "engine_complete": True,
+            "contract_sha256": "d" * 64,
+        },
+        "implementer-summary.json": {"complete": True, "total_cost_usd": 0.5},
+        "reviewer-summary.json": {"complete": True, "total_cost_usd": 0.1},
         "gate-check.json": {
             "ok": True,
             "tip": tip,
@@ -729,15 +773,19 @@ def evidence(tmp: Path, **override: dict[str, Any]) -> tuple[Path, dict[str, str
             "tip": tip,
             "baseline": {"label": "trusted_baseline", "status": "pass"},
         },
-        "review.json": {"accepted": True, "problems": [], "verdict": GOOD},
+        "review.json": {
+            "accepted": True,
+            "problems": [],
+            "verdict": GOOD,
+            "engine_invoked": True,
+            "engine_complete": True,
+        },
     } | override
     ev = tmp / "ev"
     ev.mkdir(exist_ok=True)
     for name, data in files.items():
         (ev / name).write_text(json.dumps(data), encoding="utf-8")
-    return ev, {
-        n: gate.sha256_file(ev / n) for n in ("gate-check.json", "criteria.json", "review.json")
-    }
+    return ev, {n: gate.sha256_file(ev / n) for n in files}
 
 
 def test_a_fully_verified_run_is_ready_for_a_human_and_lists_manual_criteria(
@@ -951,3 +999,252 @@ def test_criteria_order_is_part_of_what_was_approved() -> None:
     assert contract.digest(contract.parse(swapped, cfg)) != contract.digest(
         contract.parse(text, cfg)
     )
+
+
+# --- PR #2 review: engine failure handling -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("script", "why"),
+    [
+        ({"exit": 1}, "exited 1"),
+        ({"subtype": "error_max_turns"}, "error_max_turns"),
+        ({"subtype": "error_max_budget_usd", "exit": 1}, "exited 1"),
+        ({"is_error": True}, "reported an error"),
+        ({"raw_output": "not json at all"}, "unreadable"),
+    ],
+)
+def test_an_incomplete_implementer_run_is_never_committed_or_bundled(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, script: dict[str, Any], why: str
+) -> None:
+    writes = {"tests/test_demo_counts.py": "def test_x():\n    pass\n"}
+    res, _, out = run_agent(env, monkeypatch, writes=writes, **script)
+    assert res["status"] == "engine_incomplete"
+    assert res["engine_complete"] is False
+    assert why in res["reason"]
+    assert not (out / "agent.bundle").exists()
+    summary = json.loads((out / "implementer-summary.json").read_text(encoding="utf-8"))
+    assert summary["complete"] is False  # diagnostics kept, readiness not claimed
+
+
+def test_a_failed_reviewer_is_not_an_approval_even_with_an_approving_verdict(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ev, expected, gh, run = review_setup(env, monkeypatch, GOOD)
+    monkeypatch.setenv(
+        "AEH_FAKE_SCRIPT",
+        str(fake_script(env["tmp"], "rev-fail", structured_output=GOOD, exit=1)),
+    )
+    res = pilot.review(run, env["root"], env["cfg"], gh, CONTRACT, ev, expected, env["tmp"] / "r")
+    assert res["accepted"] is False
+    assert res["verdict"] is None
+    assert any("reviewer engine incomplete" in p for p in res["problems"])
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"agent.json": {"status": "committed", "tip": "c" * 40, "engine_complete": False}},
+        {
+            "review.json": {
+                "accepted": True,
+                "problems": [],
+                "verdict": GOOD,
+                "engine_invoked": True,
+                "engine_complete": False,
+            }
+        },
+    ],
+)
+def test_the_verdict_requires_both_engines_to_have_completed(
+    tmp_path: Path, override: dict[str, Any]
+) -> None:
+    ev, expected = evidence(tmp_path, **override)
+    assert pilot.verdict(ev, expected)["ready_for_human"] is False
+
+
+# --- PR #2 review: pre-upload confidentiality ------------------------------------------
+
+
+def test_engine_output_is_redacted_and_the_raw_transcript_is_not_kept(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    res, _, out = run_agent(
+        env,
+        monkeypatch,
+        writes={"tests/test_demo_counts.py": "def test_x():\n    pass\n"},
+        result=f"done; the key was {CANARY}",
+        stderr=f"debug: {CANARY}",
+    )
+    assert res["status"] == "committed"
+    assert not (out / "implementer-run.json").exists()
+    for f in uploadable(out):
+        assert CANARY not in f.read_text(encoding="utf-8"), f.name
+    summary = (out / "implementer-summary.json").read_text(encoding="utf-8")
+    assert confidential.REDACTED in summary
+
+
+def test_a_held_credential_with_no_recognisable_shape_is_still_blocked(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = "plain-credential-value-without-a-prefix-0042"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", plain)  # held by the job, never by the fake engine
+    res, _, out = run_agent(
+        env, monkeypatch, writes={"tests/test_demo_counts.py": f"X = '{plain}'\n"}
+    )
+    assert res["status"] == "confidentiality_blocked"
+    assert res["findings"] == ["held-credential"]
+    for f in uploadable(out):
+        assert plain not in f.read_text(encoding="utf-8"), f.name
+
+
+def test_redaction_covers_patterns_and_held_values_but_not_short_ones() -> None:
+    held = {"GH_TOKEN": "a-long-opaque-token-value", "GITHUB_TOKEN": "short"}
+    text = f"{CANARY} and a-long-opaque-token-value and short"
+    assert confidential.findings(text, held) == ["harness-canary", "held-credential"]
+    assert confidential.redact(text, held) == "[REDACTED] and [REDACTED] and short"
+    nested = confidential.redact_obj({"a": [f"x {CANARY}"]}, held)
+    assert nested == {"a": ["x [REDACTED]"]}
+
+
+def test_no_job_uploads_a_raw_engine_transcript(wf: dict[str, Any]) -> None:
+    for name, job in wf["jobs"].items():
+        for step in job["steps"]:
+            if str(step.get("uses", "")).startswith("actions/upload-artifact"):
+                assert "-run.json" not in str(step["with"]["path"]), name
+
+
+# --- PR #2 review: cumulative runtime budget -----------------------------------------------
+
+
+def budget_review(
+    env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    implementer_cost: float | None,
+    prior: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    ev, expected, gh, run = review_setup(env, monkeypatch, GOOD)
+    gh.posted[:0] = prior or []
+    summary = ev / "implementer-summary.json"
+    data = json.loads(summary.read_text(encoding="utf-8")) | {"total_cost_usd": implementer_cost}
+    summary.write_text(json.dumps(data), encoding="utf-8")
+    expected["implementer-summary.json"] = gate.sha256_file(summary)
+    called: list[str] = []
+    real = pilot.run_engine
+
+    def tracked(*args: Any, **kw: Any) -> tuple[int, str]:
+        called.append(args[1])
+        return real(*args, **kw)
+
+    monkeypatch.setattr(pilot, "run_engine", tracked)
+    res = pilot.review(run, env["root"], env["cfg"], gh, CONTRACT, ev, expected, env["tmp"] / "r")
+    return res, called
+
+
+def test_no_reviewer_is_paid_for_when_the_implementer_used_the_headroom(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    res, called = budget_review(env, monkeypatch, implementer_cost=2.4)  # 3 - 2.4 < 0.75
+    assert called == []
+    assert res["engine_invoked"] is False
+    assert res["accepted"] is False
+    assert res["budget"]["sufficient"] is False
+    assert any("insufficient budget" in p for p in res["problems"])
+
+
+def test_an_unknown_implementer_cost_counts_at_its_full_allocation(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    res, called = budget_review(env, monkeypatch, implementer_cost=None)  # counted as 2.00
+    assert res["budget"]["implementer_usd"] == 2.0
+    assert res["budget"]["implementer_cost_known"] is False
+    assert called == ["reviewer"]
+
+
+def earlier_attempt(digest: str, base: str, impl: Any, rev: Any) -> list[dict[str, Any]]:
+    """A settled attempt from before the current approval."""
+    return [
+        rec(
+            "reserve", "2026-10-30T10:00:00Z", contract=digest, base=base, run_id="50",
+            run_attempt="1", implementer_usd=2.0, reviewer_usd=0.75,
+        ),
+        acct("50", impl, rev),
+    ]  # fmt: skip
+
+
+def test_spend_from_earlier_attempts_is_part_of_the_reconciliation(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = contract.digest(contract.parse(issue_body(env["sha"]), env["cfg"]))
+    earlier = earlier_attempt(digest, env["sha"], 0.1, 0.1)
+    # 3 - 0.2 earlier - 2.1 now = 0.7 < 0.75; without the earlier attempt it would be 0.9
+    res, called = budget_review(env, monkeypatch, implementer_cost=2.1, prior=earlier)
+    assert res["budget"]["prior_usd"] == pytest.approx(0.2)
+    assert called == []
+
+
+def test_the_verdict_reports_final_spend_and_refuses_an_overrun(tmp_path: Path) -> None:
+    ev, expected = evidence(
+        tmp_path,
+        **{
+            "implementer-summary.json": {"complete": True, "total_cost_usd": 2.6},
+            "reviewer-summary.json": {"complete": True, "total_cost_usd": 0.6},
+        },
+    )
+    result = pilot.verdict(ev, expected)
+    assert result["budget"]["spent_usd"] == pytest.approx(3.2)
+    assert result["budget"]["over_budget"] is True
+    assert result["ready_for_human"] is False
+
+
+def test_the_verdict_counts_unknown_costs_conservatively(tmp_path: Path) -> None:
+    unknown: dict[str, dict[str, Any]] = {
+        "implementer-summary.json": {"complete": True, "total_cost_usd": None},
+        "reviewer-summary.json": {"complete": True},
+    }
+    ev, expected = evidence(tmp_path, **unknown)
+    budget = pilot.verdict(ev, expected)["budget"]
+    assert budget["spent_usd"] == pytest.approx(2.75)
+    assert budget["costs_known"] is False
+
+
+def test_the_verdict_includes_earlier_attempts(tmp_path: Path) -> None:
+    ev, expected = evidence(tmp_path)  # this attempt: 0.5 + 0.1
+    unsettled = earlier_attempt("d" * 64, "a" * 40, None, None)[:1]  # reservation, no account
+    records = ledger.parse(unsettled)
+    result = pilot.verdict(ev, expected, records=records, run=run_for("a" * 40))
+    assert result["budget"]["prior_usd"] == pytest.approx(2.75)  # counted in full
+    assert result["budget"]["over_budget"] is True
+    assert result["ready_for_human"] is False
+
+
+# --- PR #2 review: concurrency and criteria isolation ----------------------------------------
+
+
+def test_one_pilot_at_a_time_across_the_repository(wf: dict[str, Any]) -> None:
+    assert wf["concurrency"] == {"group": "acp-pilot", "cancel-in-progress": False}
+
+
+def test_each_executable_criterion_gets_a_fresh_tree(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, out = run_agent(
+        env, monkeypatch, writes={"tests/test_demo_counts.py": "def test_x():\n    pass\n"}
+    )
+    seen: list[tuple[Path, bool]] = []
+
+    def execute(cmd: list[str], cwd: Path) -> tuple[int, str]:
+        seen.append((cwd, (cwd / "tampered.txt").exists()))
+        (cwd / "tampered.txt").write_text("left behind by the previous criterion")
+        (cwd / "tests/test_demo_counts.py").write_text("def test_x():\n    assert False\n")
+        return 0, "ok"
+
+    monkeypatch.setattr(gate, "sandboxed", lambda: True)
+    gate.evaluate(
+        env["root"], env["sha"], "agent/7", CONTRACT, bundle=out / "agent.bundle",
+        run_criteria=True, execute=execute,
+    )  # fmt: skip
+    candidate_runs = seen[1:]  # seen[0] is the trusted baseline
+    assert len(candidate_runs) == 2  # verify and the pytest node
+    assert len({cwd for cwd, _ in seen}) == len(seen)
+    assert not any(tampered for _, tampered in seen)

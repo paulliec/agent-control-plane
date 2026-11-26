@@ -246,9 +246,17 @@ def evaluate(
                 "label": "trusted_baseline",
                 **run_criterion(verify, cfg, base_tree, execute),
             }
-            cand_tree = materialize(root, tip_ref, Path(tmp) / "candidate")
             report["criteria_label"] = "candidate_authored"
-            report["criteria"] = [run_criterion(c, cfg, cand_tree, execute) for c in task.criteria]
+            # a fresh clone per executable criterion: one criterion's run (say,
+            # verify.sh rewriting files) can't change the tree the next one judges
+            report["criteria"] = [
+                run_criterion(c, cfg, Path(tmp), execute)
+                if c.kind == "manual"
+                else run_criterion(
+                    c, cfg, materialize(root, tip_ref, Path(tmp) / f"candidate-{i}"), execute
+                )
+                for i, c in enumerate(task.criteria)
+            ]
     elif clean:
         report["criteria"] = [
             {
