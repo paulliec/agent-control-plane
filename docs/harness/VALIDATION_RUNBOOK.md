@@ -74,6 +74,16 @@ merge commit **H**.
    and **don't label them yet**. Record each issue number; the drill scripts
    are named by them.
 
+   Done on 2026-11-27, with `gh issue create`: the form isn't offered because
+   it isn't on the default branch, so each body is the contract followed by a
+   `### Pinned base` section, which is what the form renders.
+
+   | Run | P0 | D1 | D3 | D4 | D5 | D8 | D9 |
+   |---|---|---|---|---|---|---|---|
+   | Issue | #3 | #4 | #5 | #6 | #7 | #8 | #9 |
+
+   D7 has no issue of its own: it re-uses #3 after P0.
+
 ## 3. Drill scripts, and how they're bound to the trusted base
 
 The workflow points the fake engine at
@@ -95,6 +105,10 @@ Procedure (one approval: the drill-scripts PR):
    fake pipeline (the same fixtures as `tests/test_harness_pilot.py`) and
    asserts the agent status §4 expects. A script that doesn't produce its
    documented outcome locally never gets pushed.
+
+   Local runs can't reproduce the container. D1's network and host-path
+   probes are judged live only. Locally, its two environment probes run in
+   a scrubbed environment, and are shown to fail when a credential is present.
 2. Open a PR into `demo-release-readiness`. It needs green CI, independent
    review and a merge. Call that merge commit **D**.
 3. Edit each issue: **Pinned base = D**. Edit before labelling: an edit after
@@ -235,7 +249,7 @@ budget (`docs/HARNESS.md`, "Ledger integrity").
 ## 6. Stopping conditions for the whole series
 
 Stop, report, and don't continue to P1 if any of these happens:
-- a run's outcome differs from §4 in status, problem text or ledger;
+- a run's outcome differs from §4 in status, kind of problem or ledger;
 - any canary value appears in a log or artifact;
 - any job requests `acp-agent`, or holds a token or secret beyond `docs/HARNESS.md`;
 - a negative drill unexpectedly ends `ready_for_human: true`.

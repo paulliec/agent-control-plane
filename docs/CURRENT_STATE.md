@@ -19,8 +19,8 @@ Obtained by running `./scripts/verify.sh`:
 |---|---|
 | `ruff format --check .` | clean |
 | `ruff check .` | clean |
-| `mypy --strict` (src + tests + scripts) | clean, 65 files |
-| `pytest --cov` | **745 passed**, **97.62%** coverage (floor 96%) |
+| `mypy --strict` (src + tests + scripts) | clean, 66 files |
+| `pytest --cov` | **761 passed**, **97.62%** coverage (floor 96%) |
 | Demo seed from committed fixtures | 166 events, 20 violations |
 | CLI smoke (`stats`/`runs`/`violations`/`trace`/`evaluate`) | clean |
 
@@ -126,9 +126,12 @@ Accurate as of the date above. None of these are bugs; all are deliberate stops.
    Phase 1.5 security fixes (`docs/HARNESS.md`). 176 of the 591 tests are
    harness tests. Coverage measures only the package, so the figure is
    unchanged.
-8. *This change:* pilot runner (PR #2), implemented on `feat/pilot-runner`,
-   never run live (`docs/HARNESS.md`, "Pilot runner"). 154 new tests: 330 of
-   the 745 are harness tests (86% harness coverage, measured separately).
+8. Pilot runner (PR #2), merged into `demo-release-readiness`, never run
+   live (`docs/HARNESS.md`, "Pilot runner"). 154 tests.
+9. *This change:* fake-engine drill scripts (`docs/harness/drills/`) and
+   `tests/test_harness_drills.py`, which runs each through the local pipeline
+   (`docs/harness/VALIDATION_RUNBOOK.md` §3). 16 new tests: 346 of the 761
+   are harness tests.
 
 ## Branches
 

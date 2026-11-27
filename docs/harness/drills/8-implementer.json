@@ -1,0 +1,9 @@
+{
+  "writes": {
+    "tests/test_demo_counts.py": "\"\"\"Pins the demo's documented headline numbers (docs/CURRENT_STATE.md).\n\nThe expected values are literals copied from the docs, not computed, so a change\nthat moves them fails here instead of silently making the docs wrong.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom collections.abc import Iterator\nfrom pathlib import Path\n\nimport pytest\n\nfrom agent_control_plane.bootstrap import ControlPlane, build_control_plane\nfrom agent_control_plane.config import Settings\nfrom agent_control_plane.demo import ensure_demo_data\n\nROOT = Path(__file__).resolve().parents[1]\n\n\n@pytest.fixture(scope=\"module\")\ndef demo(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ControlPlane]:\n    settings = Settings(\n        db_path=tmp_path_factory.mktemp(\"demo\") / \"demo.db\",\n        data_dir=ROOT / \"data\",\n        registry_dir=ROOT / \"config\",\n    )\n    assert ensure_demo_data(settings).seeded\n    with build_control_plane(settings) as cp:\n        yield cp\n\n\ndef test_synthetic_events(demo: ControlPlane) -> None:\n    assert demo.analytics.events_by_source().get(\"synthetic\") == 143\n\n\ndef test_mcp_events(demo: ControlPlane) -> None:\n    assert demo.analytics.events_by_source().get(\"mcp\") == 10\n\n\ndef test_snowflake_events(demo: ControlPlane) -> None:\n    assert demo.analytics.events_by_source().get(\"snowflake\") == 13\n\n\ndef test_total_events(demo: ControlPlane) -> None:\n    assert demo.repository.count_events(demo.tenant_id) == 166\n\n\ndef test_violations(demo: ControlPlane) -> None:\n    assert len(demo.analytics.violations(limit=1_000)) == 20\n"
+  },
+  "cost_usd": 2.4,
+  "subtype": "success",
+  "is_error": false,
+  "result": "drill implementer done"
+}
