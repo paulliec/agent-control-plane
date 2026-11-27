@@ -358,7 +358,7 @@ def _write(path: Path, data: dict[str, Any]) -> None:
 def agent(
     run: Run, root: Path, cfg: Config, gh: GitHub, contract_path: str, out: Path
 ) -> dict[str, Any]:
-    _, digest, _ = require_reservation(run, root, cfg, gh, contract_path)
+    task, digest, _ = require_reservation(run, root, cfg, gh, contract_path)
     assert cfg.budget is not None
     out.mkdir(parents=True, exist_ok=True)
     gitdir, work = out / "agent.git", out / "work"
@@ -430,6 +430,19 @@ def agent(
     ).stdout  # fmt: skip
     if hits := confidential.findings(history):
         return finish("confidentiality_blocked", findings=hits)
+
+    # Trusted pre-upload scope: a candidate touching protected or out-of-contract
+    # paths never becomes a bundle. check repeats this independently.
+    sc = scope.check(
+        scope.changed_files(root, run.sha, tip, "--git-dir", str(gitdir)), task.allowed_paths, cfg
+    )
+    if not sc.ok:
+        return finish(
+            "scope_blocked",
+            scope=confidential.redact_obj(
+                {"protected": list(sc.protected), "outside_contract": list(sc.outside_contract)}
+            ),
+        )
 
     bundle = out / "agent.bundle"
     scope.git(
@@ -586,8 +599,7 @@ def review(
             f"${cfg.budget.reviewer_usd:.2f} needed; no reviewer was run"
         ]
         result["accepted"] = False
-        _write(out / "review.json", result)
-        return result
+        return _write_review(out, result)
 
     gate._import_bundle(root, evidence / "agent.bundle", run.branch)
     work = gate.materialize(root, gate.CANDIDATE_REF, out / "review-work")
@@ -630,27 +642,46 @@ def review(
     result.update(
         engine_invoked=True,
         engine_complete=summary["complete"],
-        verdict=confidential.redact_obj(verdict),
+        verdict=verdict,
         problems=problems,
         accepted=not problems,
     )
-    _write(out / "review.json", result)
-    return result
+    return _write_review(out, result)
 
 
-def account(run: Run, gh: GitHub, evidence: Path, review_result: str) -> str:
-    impl = reported_cost(evidence / "implementer-summary.json")
-    rev: float | str | None = reported_cost(evidence / "reviewer-summary.json")
-    if rev is None and (review_result == "skipped" or _not_invoked(evidence)):
+def _write_review(out: Path, result: dict[str, Any]) -> dict[str, Any]:
+    # the whole object: problems quote model output (a verdict string, an engine reason)
+    redacted: dict[str, Any] = confidential.redact_obj(result)
+    _write(out / "review.json", redacted)
+    return redacted
+
+
+def _bound(evidence: Path, expected: dict[str, str], name: str) -> Path | None:
+    """The evidence file only if it matches the digest its producing job recorded."""
+    p, want = evidence / name, expected.get(name, "")
+    return p if want and p.exists() and gate.sha256_file(p) == want else None
+
+
+def account(
+    run: Run, gh: GitHub, evidence: Path, review_result: str, expected: dict[str, str]
+) -> str:
+    """Costs come only from digest-bound summaries. Anything missing, unbound or
+    unreadable is recorded as unknown, which the ledger counts at full allocation."""
+    impl_s = _bound(evidence, expected, "implementer-summary.json")
+    impl = reported_cost(impl_s) if impl_s else None
+    rev_s = _bound(evidence, expected, "reviewer-summary.json")
+    rev: float | str | None = reported_cost(rev_s) if rev_s else None
+    if review_result == "skipped" or (rev is None and _not_invoked(evidence, expected)):
         rev = "not_run"
     body = ledger.account(run.run_id, run.attempt, impl, rev)
     gh.comment(run.issue, body)
     return body
 
 
-def _not_invoked(evidence: Path) -> bool:
+def _not_invoked(evidence: Path, expected: dict[str, str]) -> bool:
+    p = _bound(evidence, expected, "review.json")
     try:
-        data = json.loads((evidence / "review.json").read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8")) if p else None
     except (OSError, json.JSONDecodeError):
         return False
     return isinstance(data, dict) and data.get("engine_invoked") is False
@@ -811,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
                 "summary_sha256": gate.sha256_file(summary) if summary.exists() else "",
             }
         elif args.stage == "account":
-            res = {"recorded": account(run, gh, args.evidence, args.review_result)}
+            res = {"recorded": account(run, gh, args.evidence, args.review_result, expected)}
         else:
             res = verdict(
                 args.evidence,

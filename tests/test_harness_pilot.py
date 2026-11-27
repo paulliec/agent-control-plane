@@ -15,11 +15,21 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
-from scripts.harness import confidential, config, contract, gate, ledger, pilot, sandbox
+from scripts.harness import (
+    confidential,
+    config,
+    contract,
+    gate,
+    ledger,
+    pilot,
+    sandbox,
+    scope,
+)
 from scripts.harness.config import REPO_ROOT, Budget
 
 CONTRACT = "docs/harness/pilot-demo-counts.md"
@@ -486,10 +496,34 @@ def test_a_benign_candidate_passes_the_trusted_check(
 def test_protected_and_out_of_scope_edits_fail_the_check(
     env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, writes: dict[str, str]
 ) -> None:
+    # disable the pre-upload scope check to prove check doesn't depend on it
+    no_scope = SimpleNamespace(**vars(scope))
+    no_scope.check = lambda *a: scope.ScopeResult(("x",), (), ())
+    monkeypatch.setattr(pilot, "scope", no_scope)
     writes = {"tests/test_demo_counts.py": "def test_x():\n    pass\n", **writes}
     res, _, out = run_agent(env, monkeypatch, writes=writes)
     report = check(env, res, out)
     assert report["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [
+        ("CLAUDE.md", "protected"),
+        ("harness.toml", "protected"),
+        (".github/workflows/agent-pilot.yml", "protected"),
+        ("src/agent_control_plane/demo.py", "outside_contract"),
+    ],
+)
+def test_an_out_of_scope_candidate_never_becomes_a_bundle(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, path: str, kind: str
+) -> None:
+    writes = {"tests/test_demo_counts.py": "def test_x():\n    pass\n", path: "changed\n"}
+    res, _, out = run_agent(env, monkeypatch, writes=writes)
+    assert res["status"] == "scope_blocked"
+    assert path in res["scope"][kind]
+    assert "tip" not in res and "bundle_sha256" not in res
+    assert not (out / "agent.bundle").exists()
 
 
 def test_a_secret_written_into_the_candidate_never_reaches_a_bundle(
@@ -744,7 +778,7 @@ def test_account_records_missing_costs_as_unknown_and_skipped_review_as_not_run(
     tmp_path: Path,
 ) -> None:
     gh = FakeGitHub("")
-    body = pilot.account(run_for("a" * 40), gh, tmp_path, "skipped")
+    body = pilot.account(run_for("a" * 40), gh, tmp_path, "skipped", {})
     data = json.loads(body.split("```json\n")[1].split("\n```")[0])
     assert data["implementer_cost_usd"] is None
     assert data["reviewer_cost_usd"] == "not_run"
@@ -1248,3 +1282,89 @@ def test_each_executable_criterion_gets_a_fresh_tree(
     assert len(candidate_runs) == 2  # verify and the pytest node
     assert len({cwd for cwd, _ in seen}) == len(seen)
     assert not any(tampered for _, tampered in seen)
+
+
+# --- PR #2 re-review: reviewer redaction, bound cost evidence -------------------------
+
+
+def test_the_whole_review_result_is_redacted_including_problems(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a verdict value the harness quotes back into its own problem list
+    ev, expected, gh, run = review_setup(env, monkeypatch, GOOD | {"verdict": CANARY})
+    out = env["tmp"] / "r"
+    res = pilot.review(run, env["root"], env["cfg"], gh, CONTRACT, ev, expected, out)
+    assert res["accepted"] is False
+    assert CANARY not in json.dumps(res)
+    assert CANARY not in (out / "review.json").read_text(encoding="utf-8")
+    assert any(confidential.REDACTED in p for p in res["problems"])
+
+
+def account_evidence(tmp: Path) -> tuple[Path, dict[str, str]]:
+    ev = tmp / "acct"
+    ev.mkdir()
+    files = {
+        "implementer-summary.json": {"complete": True, "total_cost_usd": 0.5},
+        "reviewer-summary.json": {"complete": True, "total_cost_usd": 0.25},
+        "review.json": {"engine_invoked": True, "accepted": True},
+    }
+    for name, data in files.items():
+        (ev / name).write_text(json.dumps(data), encoding="utf-8")
+    return ev, {n: gate.sha256_file(ev / n) for n in files}
+
+
+def recorded(ev: Path, expected: dict[str, str], review_result: str = "success") -> dict[str, Any]:
+    body = pilot.account(run_for("a" * 40), FakeGitHub(""), ev, review_result, expected)
+    data: dict[str, Any] = json.loads(body.split("```json\n")[1].split("\n```")[0])
+    return data
+
+
+def test_account_takes_costs_only_from_digest_bound_summaries(tmp_path: Path) -> None:
+    ev, expected = account_evidence(tmp_path)
+    data = recorded(ev, expected)
+    assert (data["implementer_cost_usd"], data["reviewer_cost_usd"]) == (0.5, 0.25)
+
+
+@pytest.mark.parametrize("name", ["implementer-summary.json", "reviewer-summary.json"])
+@pytest.mark.parametrize("how", ["forged", "unbound", "missing"])
+def test_forged_or_unbound_cost_evidence_counts_at_full_allocation(
+    tmp_path: Path, name: str, how: str
+) -> None:
+    ev, expected = account_evidence(tmp_path)
+    if how == "forged":  # a cheaper figure than the producing job recorded
+        (ev / name).write_text(json.dumps({"total_cost_usd": 0.0}), encoding="utf-8")
+    elif how == "unbound":
+        expected[name] = ""
+    else:
+        (ev / name).unlink()
+    data = recorded(ev, expected)
+    impl_side = name.startswith("implementer")
+    assert data["implementer_cost_usd" if impl_side else "reviewer_cost_usd"] is None
+    # and the ledger then counts that side at its full reservation
+    reserve = {"contract": "d", "run_id": data["run_id"], "run_attempt": data["run_attempt"],
+               "implementer_usd": 2.0, "reviewer_usd": 0.75}  # fmt: skip
+    records = [
+        ledger.Record("reserve", datetime.now(UTC), reserve),
+        ledger.Record("account", datetime.now(UTC), data, 1),
+    ]
+    want = 2.0 + 0.25 if impl_side else 0.5 + 0.75
+    assert ledger.spent(records, "d") == pytest.approx(want)
+
+
+def test_an_unbound_review_record_cannot_claim_the_reviewer_never_ran(tmp_path: Path) -> None:
+    ev, expected = account_evidence(tmp_path)
+    (ev / "reviewer-summary.json").unlink()
+    (ev / "review.json").write_text(json.dumps({"engine_invoked": False}), encoding="utf-8")
+    assert recorded(ev, expected)["reviewer_cost_usd"] is None  # not "not_run", i.e. $0
+    expected["review.json"] = gate.sha256_file(ev / "review.json")
+    assert recorded(ev, expected)["reviewer_cost_usd"] == "not_run"
+
+
+def test_the_account_job_binds_its_cost_evidence(wf: dict[str, Any]) -> None:
+    run = " ".join(s.get("run", "") for s in wf["jobs"]["account"]["steps"])
+    for name, src in (
+        ("implementer-summary.json", "needs.agent.outputs.summary_sha256"),
+        ("review.json", "needs.review.outputs.review_sha256"),
+        ("reviewer-summary.json", "needs.review.outputs.summary_sha256"),
+    ):
+        assert f'--expect "{name}=${{{{ {src} }}}}"' in run

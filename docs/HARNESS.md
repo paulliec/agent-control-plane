@@ -303,11 +303,11 @@ on a branch any workflow runs from.
 | Job | Token | Secret | Runs candidate code | Does |
 |---|---|---|---|---|
 | `authorize` | contents read, issues write | none | no | Trust anchor; ledger check; posts the **reservation** |
-| `agent` | contents read, issues read | model key (`acp-agent` approval) | **no**: tools are Read/Edit/Write/Grep/Glob only | The engine edits a separate clone, with a scrubbed environment (no `GH_TOKEN`). Its run must be **complete**: exit 0 and a result reporting `success`. Budget or turn exhaustion, malformed output or an error means `engine_incomplete`, with nothing committed or bundled. Trusted code commits with an external git dir (hooks and fsmonitor off), runs the **pre-upload confidentiality scan**, and only then bundles. Uploads only the sanitised summary, never the raw transcript |
+| `agent` | contents read, issues read | model key (`acp-agent` approval) | **no**: tools are Read/Edit/Write/Grep/Glob only | The engine edits a separate clone, with a scrubbed environment (no `GH_TOKEN`). Its run must be **complete**: exit 0 and a result reporting `success`. Budget or turn exhaustion, malformed output or an error means `engine_incomplete`, with nothing committed or bundled. Trusted code commits with an external git dir (hooks and fsmonitor off), runs the **pre-upload confidentiality scan** and the **pre-upload scope check** (protected or out-of-contract paths mean `scope_blocked`, no bundle), and only then bundles. Uploads only the sanitised summary, never the raw transcript |
 | `check` | contents read | none | no | **Trusted verdict**: pinned base, bundle digest and tip bound, ancestry, no merges, `agent/*`, scope on every commit, secret scan of every added line |
 | `criteria` | contents read | none | **yes, in a container** | Wheelhouse built from the base's `pyproject.toml`. Then `trusted_baseline` (base tests), and each `candidate_authored` criterion, each in **its own fresh clone** and container, so no criterion can alter the tree another judges |
-| `review` | contents read, issues read | model key (`acp-agent` approval) | no | **Reconciles budget first.** If less than the reviewer's full allocation remains after earlier attempts and the implementer's actual cost (or its full allocation when unreported), no reviewer is run. Otherwise: Read/Grep/Glob only, under `--json-schema`, given the contract, diff and labelled evidence, all digest-checked, never the implementer's transcript. An incomplete reviewer run is never an approval |
-| `account` | contents read, issues write | none | no | Settles the reservation with reported costs |
+| `review` | contents read, issues read | model key (`acp-agent` approval) | no | **Reconciles budget first.** If less than the reviewer's full allocation remains after earlier attempts and the implementer's actual cost (or its full allocation when unreported), no reviewer is run. Otherwise: Read/Grep/Glob only, under `--json-schema`, given the contract, diff and labelled evidence, all digest-checked, never the implementer's transcript. An incomplete reviewer run is never an approval. The whole result, problems included, is redacted before it is written |
+| `account` | contents read, issues write | none | no | Settles the reservation with reported costs, taken only from summaries whose digests match what `agent` and `review` recorded. Missing, unbound or altered evidence is recorded as unknown, which counts at full allocation. `not_run` only when GitHub reports `review` skipped, or a digest-bound `review.json` says no reviewer was invoked |
 | `verdict` | contents read, issues read | none | no | `ready_for_human` only if every stage passed, both engines completed, every digest matches, and **final cumulative spend** (earlier attempts plus this one, unknown costs at full allocation) is within the task budget. Spend and overrun status are always reported |
 
 **Container** (`sandbox.py`):
@@ -335,7 +335,11 @@ code has checked it:
   transcript is deleted.
 - Engine stdout and stderr are captured, never streamed to the job log.
 
-`check`'s independent scan of the bundle remains.
+- The changed paths are checked against the contract and the protected list.
+  Out of scope means `scope_blocked`: no bundle.
+- The reviewer's whole result is redacted, not just its verdict.
+
+`check`'s independent scan and scope check of the bundle remain.
 
 **Publication.** None. The output is `agent.bundle` plus evidence. Paul
 publishes by hand (see the pilot sequence below).
@@ -478,9 +482,9 @@ The merge commit is **H**.
    random `ACP_CANARY_...` value. It is never a real key.
 4. Create the labels `acp:approved` and `acp:blocked`.
 
-**C. Live drills.** These use the fake engine and cost nothing. They need
-scripts under `docs/harness/drills/`, which are added when the drills are
-approved. Each drill must end in a verdict that isn't ready, for the stated
+**C. Live drills.** These use the fake engine and cost nothing. The procedure
+is `docs/harness/VALIDATION_RUNBOOK.md`. They need scripts under
+`docs/harness/drills/`, which are added when the drills are approved. Each drill must end in a verdict that isn't ready, for the stated
 reason, and spend no money:
 - credential reads from inside the container
 - network egress

@@ -265,6 +265,9 @@ jobs:
       - run: >-
           python -m scripts.harness.pilot account --contract "$CONTRACT"
           --evidence "$EVIDENCE" --review-result "${{ needs.review.result }}"
+          --expect "implementer-summary.json=${{ needs.agent.outputs.summary_sha256 }}"
+          --expect "review.json=${{ needs.review.outputs.review_sha256 }}"
+          --expect "reviewer-summary.json=${{ needs.review.outputs.summary_sha256 }}"
         env:
           GH_TOKEN: ${{ github.token }}
 
