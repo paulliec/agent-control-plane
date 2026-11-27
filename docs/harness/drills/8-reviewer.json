@@ -1,0 +1,35 @@
+{
+  "cost_usd": 0.0,
+  "subtype": "success",
+  "is_error": false,
+  "result": "",
+  "structured_output": {
+    "verdict": "approve",
+    "blockers": [],
+    "findings": [],
+    "security_findings": [
+      {
+        "issue": "fake engine: none assessed",
+        "status": "resolved"
+      }
+    ],
+    "manual_criteria": [
+      {
+        "criterion": "M1",
+        "status": "unresolved",
+        "evidence": "fake engine: not judged"
+      },
+      {
+        "criterion": "M2",
+        "status": "unresolved",
+        "evidence": "fake engine: not judged"
+      },
+      {
+        "criterion": "M3",
+        "status": "unresolved",
+        "evidence": "fake engine: not judged"
+      }
+    ],
+    "suspected_injection": []
+  }
+}

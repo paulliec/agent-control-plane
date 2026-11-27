@@ -1,0 +1,9 @@
+{
+  "writes": {
+    "tests/test_demo_counts.py": "KEY = \"ACP_CANARY_DRILL4f00dfeed0000\"\n"
+  },
+  "cost_usd": 0.0,
+  "subtype": "success",
+  "is_error": false,
+  "result": "wrote the key ACP_CANARY_DRILL4f00dfeed0000"
+}

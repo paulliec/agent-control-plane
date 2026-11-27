@@ -1,0 +1,9 @@
+{
+  "writes": {
+    "tests/test_demo_counts.py": "\"\"\"Drill D1: candidate code probing its own sandbox. Every test asserts that\nisolation holds, so any failure here is a breach (docs/harness/VALIDATION_RUNBOOK.md).\"\"\"\n\nfrom __future__ import annotations\n\nimport os\nimport socket\nimport subprocess\nfrom pathlib import Path\n\nimport pytest\n\nCREDENTIAL_NAMES = (\"ANTHROPIC_API_KEY\", \"GH_TOKEN\", \"GITHUB_TOKEN\")\n\n\ndef test_no_credential_variables() -> None:\n    leaked = [k for k in os.environ if k in CREDENTIAL_NAMES or k.startswith(\"ACTIONS_\")]\n    assert leaked == []\n\n\ndef test_no_canary_in_any_value() -> None:\n    assert [k for k, v in os.environ.items() if \"ACP_CANARY_\" in v] == []\n\n\ndef test_no_git_credentials_configured() -> None:\n    try:\n        out = subprocess.run(\n            [\"git\", \"config\", \"--list\", \"--show-origin\"],\n            capture_output=True,\n            text=True,\n            timeout=10,\n        ).stdout.lower()\n    except FileNotFoundError:\n        return  # no git at all: nothing to leak through\n    assert \"extraheader\" not in out\n    assert \"credential.\" not in out\n\n\n@pytest.mark.parametrize(\n    \"path\", [\"/var/run/docker.sock\", \"/home/runner\", str(Path.home() / \".git-credentials\")]\n)\ndef test_no_host_path(path: str) -> None:\n    assert not os.path.lexists(path)\n\n\ndef test_no_tcp_egress() -> None:\n    with pytest.raises(OSError):\n        socket.create_connection((\"1.1.1.1\", 443), timeout=3).close()\n\n\ndef test_no_dns() -> None:\n    with pytest.raises(OSError):\n        socket.getaddrinfo(\"github.com\", 443)\n"
+  },
+  "cost_usd": 0.0,
+  "subtype": "success",
+  "is_error": false,
+  "result": "drill implementer done"
+}
