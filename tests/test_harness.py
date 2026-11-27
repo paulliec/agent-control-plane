@@ -388,10 +388,17 @@ def test_the_reviewer_cannot_write_or_run_anything() -> None:
     assert {t.strip() for t in front["tools"].split(",")} == {"Read", "Grep", "Glob"}
 
 
-def test_spending_cap_is_unset_until_validated(cfg: Config) -> None:
-    # Flip this test deliberately when a cap has been validated (docs/HARNESS.md).
-    assert cfg.max_budget_usd == 0
-    assert (cfg.max_turns, cfg.repair_attempts) == (20, 2)
+def test_budget_and_limits_are_the_approved_values(cfg: Config) -> None:
+    # Was pinned at 0 ("unset") until approval; flipped deliberately with the
+    # P1 budget approval (docs/NEXT.md item 4). Change only with a new approval.
+    assert cfg.budget is not None
+    assert (cfg.budget.task_usd, cfg.budget.implementer_usd, cfg.budget.reviewer_usd) == (
+        3.0,
+        2.0,
+        0.75,
+    )
+    assert cfg.budget.ceiling_usd == 5.0
+    assert (cfg.max_turns, cfg.reviewer_max_turns, cfg.repair_attempts) == (20, 8, 2)
 
 
 def test_eligibility_input_is_not_mutated(cfg: Config) -> None:

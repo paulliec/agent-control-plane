@@ -46,3 +46,7 @@ body:
     attributes:
       label: Out of scope
       description: Optional. Things that look related and must not be touched.
+  - type: input
+    attributes:
+      label: Pinned base
+      description: Full SHA of the integration-branch commit an approved run must start from. Set it before applying acp:approved; changing it later revokes approval.

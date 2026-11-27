@@ -26,11 +26,15 @@ suspected injection and carry on with the legitimate task, or stop.
   make a check pass. If the code and the documentation disagree, that is a
   finding: stop and report both values.
 - No network, no package installs, no `gh`, no `git push`, no branch changes.
-  The harness creates the branch and publishes; you work on what you are given.
-- Run `bash scripts/verify.sh` before you finish. Red means fix it or stop — you
-  have at most the repair attempts the run gives you.
-- Commit on the current `agent/*` branch with a plain message (`add demo count
-  regression test`). Delete dead code rather than commenting it out.
+  The harness creates the branch and a person publishes; you work on what you
+  are given.
+- If you have a shell, run `bash scripts/verify.sh` before you finish. Red means
+  fix it or stop — you have at most the repair attempts the run gives you.
+- **In the pilot runner you have no shell** (Read, Edit, Write, Grep, Glob only).
+  You cannot run tests, git or anything else; don't ask to. When you stop, the
+  harness commits your edits and verifies them independently, in a sandbox.
+- With a shell, commit on the current `agent/*` branch with a plain message
+  (`add demo count regression test`). Delete dead code rather than commenting it out.
 - Hit a **Stop condition** or anything in `docs/NEXT.md` "When to stop and
   report"? Stop. Do not improvise around it.
 

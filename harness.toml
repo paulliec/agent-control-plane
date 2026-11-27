@@ -4,7 +4,9 @@
 
 [repo]
 owner = "paulliec"          # the only login that may author or approve a task
-base_branch = "main"
+# The pinned base of every run must be reachable from here: the branch that
+# reviewed PRs land on. Not main until main catches up (docs/HARNESS.md).
+integration_branch = "demo-release-readiness"
 branch_prefix = "agent/"
 approved_work = "docs/NEXT.md"
 
@@ -15,10 +17,28 @@ blocked = "acp:blocked"
 # One task per run is structural: every tool here takes exactly one contract.
 [limits]
 max_turns = 20
+reviewer_max_turns = 8
 repair_attempts = 2
-# Unset on purpose. Unattended runs must refuse to start until a cap has been
-# validated against real usage (docs/HARNESS.md, "Spending cap").
-max_budget_usd = 0
+
+# Approved for P1 (docs/NEXT.md item 4). Cumulative per contract: every
+# reservation counts until its actual cost is recorded, and a missing cost
+# counts as the full allocation. The provider-side workspace limit is the only
+# hard cap; these are enforced by the harness before any model call.
+[budget]
+task_usd = 3.00
+implementer_usd = 2.00
+reviewer_usd = 0.75
+ceiling_usd = 5.00          # refuse any configuration above this
+
+# Candidate code runs only here: --network none, no env passed through,
+# non-root, read-only root, capped. The image is pinned by digest.
+[sandbox]
+image = "python:3.12-bookworm@sha256:5f0cc9bc924d72614831d2b1575de5d7c4114609a0d42ca60dfc2f0abca10dd6"
+install = ["agent-control-plane-lite[dev,dashboard]"]
+timeout_s = 1200
+cpus = "2"
+memory = "6g"               # includes the tmpfs venv
+pids = 512
 
 [verify]
 command = ["bash", "scripts/verify.sh"]
@@ -33,6 +53,7 @@ paths = [
   "pyproject.toml",
   ".gitignore",
   ".gitattributes",
+  ".git",                     # the gitfile in a separate-git-dir clone
   ".git/*",
   ".claude/*",
   ".github/*",

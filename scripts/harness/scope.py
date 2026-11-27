@@ -42,7 +42,7 @@ def git(repo: Path, *args: str) -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
-def changed_files(repo: Path, base: str, tip: str) -> list[str]:
+def changed_files(repo: Path, base: str, tip: str, *opts: str) -> list[str]:
     """Every path touched by any commit in base..tip, not just the net diff.
 
     A protected edit reverted later, or a file added then deleted, leaves the
@@ -54,8 +54,11 @@ def changed_files(repo: Path, base: str, tip: str) -> list[str]:
     # that a protected file was moved away. Git quotes unusual names
     # ("tests/caf\303\251.py"); a quoted name matches no contract glob, so it
     # fails as outside_contract — closed, not open.
-    per_commit = git(repo, "log", "--no-renames", "--name-only", "--format=", f"{base}..{tip}")
-    return per_commit + git(repo, "diff", "--no-renames", "--name-only", base, tip)
+    # opts go before the subcommand: the agent job passes its external --git-dir
+    per_commit = git(
+        repo, *opts, "log", "--no-renames", "--name-only", "--format=", f"{base}..{tip}"
+    )
+    return per_commit + git(repo, *opts, "diff", "--no-renames", "--name-only", base, tip)
 
 
 def merge_commits(repo: Path, base: str, tip: str) -> list[str]:
