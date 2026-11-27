@@ -81,8 +81,36 @@ Contracts can't contain commands. A criterion is one of exactly three forms:
 | Form | What runs |
 |---|---|
 | `verify` (required in every contract) | `harness.toml` `[verify] command` |
-| `pytest tests/<path>.py[::<name>]` | `python -m pytest <node> -q`; the node must match `^tests/[\w/]+\.py(::\w+)*$` |
-| `manual: <text>` | nothing; the reviewer and Paul judge it |
+| `pytest tests/<path>.py[::<name>]` | `python -m pytest <node> -q`; the node must match `^tests/[\w/]+\.py(::\w+)*$`. Passes only with a zero exit **and** a valid fresh test report (below) |
+| `manual: <text>` | nothing; the reviewer and Paul judge it. Numbered `M1`, `M2`, … in contract order |
+
+**A zero exit is not a test run.** A test module that calls `os._exit(0)` at
+import makes pytest exit 0 with nothing run. So a `pytest` criterion also
+needs a JUnit report, and the trusted side checks it:
+- **Fresh:** the report's file name and suite name carry a random nonce, chosen
+  when the criterion runs, after the candidate is fixed. A report already at
+  that path refuses the run. A report from another run, or one the candidate
+  shipped, has the wrong name and is rejected.
+- **Complete:** it parses, and its declared test count equals the test cases it
+  lists.
+- **Passing:** it records no failure or error, and at least one test passed
+  that belongs to the requested file or node. Skipped tests don't count.
+
+Missing, malformed, stale, empty, failed or incomplete reports all fail the
+criterion. The report is deleted after it is read.
+
+**This raises verification integrity; it is not a defence against malicious
+candidate code.** The candidate's tests run in the same process as pytest.
+They can see the nonce in `sys.argv`, write a convincing report, or tamper
+with the runner itself. A `candidate_authored` pass is still evidence, never
+proof. The `trusted_baseline` run, the reviewer and Paul's reading of the diff
+remain the checks that don't depend on the candidate. `verify` still judges
+by exit code.
+
+**Manual criteria come from the contract.** The reviewer is given them by id,
+and a verdict that doesn't assess every one is not an approval. `verdict` lists
+each one from the approved contract, always `pending` for Paul, with the
+reviewer's assessment (or `omitted`) alongside.
 
 ## Running the engine headless
 
@@ -430,7 +458,7 @@ change how CI installs, so it's out of scope here.
 The suite's coverage figure (97.62%, floor 96%) measures only the
 `agent_control_plane` package. Measured separately with
 `pytest tests/test_harness*.py --cov=scripts/harness --cov-fail-under=0`,
-harness coverage is **85%**:
+harness coverage is **86%**:
 - `ledger.py`, `scope.py` and `confidential.py`: 100%
 - `gate.py` and `guard.py`: 98%
 - `config.py`: 92%
@@ -566,8 +594,9 @@ These remain after Phase 1.5.
   Isolation comes only from where the job runs (see "Properties the runner
   must enforce").
 - **Malicious test code can fake its own result.** Conftest and startup
-  files are protected (G3). Import-time tricks inside an allowed test file are
-  not prevented. The git-only `check` verdict is unaffected. `criteria` and CI
+  files are protected (G3). A premature `os._exit(0)` no longer passes a
+  `pytest` criterion (fresh report required), but code running inside pytest
+  can still fabricate a report or subvert the runner. The git-only `check` verdict is unaffected. `criteria` and CI
   results are evidence, and a person reads the diff.
 - **Shell patterns are a second layer.** An allowed interpreter can do
   anything the process can (G6: `ruff format <path>`, `pytest --junitxml=<path>`).
@@ -587,6 +616,14 @@ These remain after Phase 1.5.
 - **Prompt injection through repo content** (docstrings, fixtures, docs) is
   discouraged by the agents' instructions and caught by the deterministic
   layers, not prevented.
+
+## Future capability: independent acceptance testing
+
+Not built, deliberately. Today every executable criterion runs code the
+candidate can influence. A standalone harness capability would run acceptance
+checks the candidate never authored and can't observe: trusted tests held
+outside the candidate tree, results collected by a process the candidate
+doesn't share. It belongs to the extracted harness, not to the pilot runner.
 
 ## Repository facts the harness depends on
 

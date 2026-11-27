@@ -13,6 +13,7 @@ import json
 import math
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -454,6 +455,15 @@ def test_drills_and_real_runs_cannot_swap_engines() -> None:
 # --- check: protected paths, secrets, artifact substitution -----------------------
 
 
+def run_honestly(cmd: list[str], cwd: Path) -> tuple[int, str]:
+    """A stand-in sandbox: pytest criteria really run (on the host, in a throwaway
+    tree of trusted test content); anything else reports success."""
+    if cmd[:3] != ["python", "-m", "pytest"]:
+        return 0, "ok"
+    proc = subprocess.run([sys.executable, *cmd[1:]], cwd=cwd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def check(env: dict[str, Any], res: dict[str, Any], out: Path, **kw: Any) -> dict[str, Any]:
     run = run_for(env["sha"], ref="refs/heads/pilot-drill/7")
     digest = kw.pop("digest", res["bundle_sha256"])
@@ -587,7 +597,7 @@ def test_baseline_and_candidate_run_in_separate_trees_with_the_right_tests(
     def execute(cmd: list[str], cwd: Path) -> tuple[int, str]:
         files = {p.relative_to(cwd).as_posix() for p in (cwd / "tests").rglob("*.py")}
         calls.append((cmd, cwd, files))
-        return 0, "ok"
+        return run_honestly(cmd, cwd)
 
     monkeypatch.setattr(gate, "sandboxed", lambda: True)
     report = gate.evaluate(
@@ -675,9 +685,13 @@ GOOD = {
     "blockers": [],
     "findings": [{"file": "tests/x.py", "line": 1, "severity": "minor", "issue": "nit"}],
     "security_findings": [{"issue": "none found", "status": "resolved"}],
-    "manual_criteria": [{"criterion": "literals", "status": "unresolved", "evidence": "?"}],
+    # one entry per manual criterion in the approved contract, by id
+    "manual_criteria": [
+        {"criterion": f"M{i}", "status": "unresolved", "evidence": "?"} for i in (1, 2, 3)
+    ],
     "suspected_injection": [],
 }
+MANUAL = pilot.manual_criteria(contract.parse((REPO_ROOT / CONTRACT).read_text(), config.load()))
 
 
 @pytest.mark.parametrize(
@@ -828,7 +842,12 @@ def test_a_fully_verified_run_is_ready_for_a_human_and_lists_manual_criteria(
     ev, expected = evidence(tmp_path)
     result = pilot.verdict(ev, expected)
     assert result["ready_for_human"] is True
-    assert result["manual_criteria_for_human"] == GOOD["manual_criteria"]
+    # every manual criterion of the approved contract, left for the human, with
+    # the reviewer's assessment alongside
+    assert result["manual_criteria_for_human"] == [
+        {"id": mid, "criterion": text, "status": "pending", "reviewer": entry}
+        for (mid, text), entry in zip(MANUAL, GOOD["manual_criteria"], strict=True)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1368,3 +1387,203 @@ def test_the_account_job_binds_its_cost_evidence(wf: dict[str, Any]) -> None:
         ("reviewer-summary.json", "needs.review.outputs.summary_sha256"),
     ):
         assert f'--expect "{name}=${{{{ {src} }}}}"' in run
+
+
+# --- PR #2 re-review: a zero exit is not a test run; manual criteria from the contract ----
+
+TARGET = "tests/test_demo_counts.py"
+PYTEST = contract.Criterion("pytest", TARGET)
+
+
+def candidate_tree(tmp: Path, test_source: str) -> Path:
+    tree = tmp / "cand"
+    (tree / "tests").mkdir(parents=True)
+    (tree / "tests" / "test_demo_counts.py").write_text(test_source, encoding="utf-8")
+    return tree
+
+
+def test_a_premature_process_exit_is_not_a_pass(tmp_path: Path) -> None:
+    # the finding: pytest exits 0 when a test module calls os._exit(0) at import
+    tree = candidate_tree(tmp_path, "import os\n\nos._exit(0)\n")
+    res = gate.run_criterion(PYTEST, config.load(), tree, run_honestly)
+    assert res["exit_code"] == 0  # the exit code alone would have said pass
+    assert res["status"] == "fail"
+    assert res["report"]["problems"] == ["no test report: the run ended before pytest finished"]
+
+
+def test_a_real_passing_run_of_the_requested_file_passes(tmp_path: Path) -> None:
+    tree = candidate_tree(tmp_path, "def test_counts() -> None:\n    assert 166 == 143 + 10 + 13\n")
+    res = gate.run_criterion(PYTEST, config.load(), tree, run_honestly)
+    assert res["status"] == "pass"
+    assert res["report"]["matched"] == 1
+    assert not list(tree.glob(".acp-junit-*.xml"))  # consumed, never left in the tree
+
+
+@pytest.mark.parametrize(
+    ("source", "problem"),
+    [
+        ("def test_a() -> None:\n    assert False\n", "failures or errors"),
+        ("import pytest\n\n\n@pytest.mark.skip\ndef test_a() -> None:\n    pass\n", "no passing"),
+    ],
+)
+def test_real_failed_or_skipped_runs_fail(tmp_path: Path, source: str, problem: str) -> None:
+    res = gate.run_criterion(PYTEST, config.load(), candidate_tree(tmp_path, source), run_honestly)
+    assert res["status"] == "fail"
+    assert any(problem in p for p in res["report"]["problems"])
+
+
+def forging(xml: str, code: int = 0) -> gate.Executor:
+    """An executor that writes `xml` (with {nonce} filled in) as the report."""
+
+    def execute(cmd: list[str], cwd: Path) -> tuple[int, str]:
+        path = next(a.split("=", 1)[1] for a in cmd if a.startswith("--junitxml="))
+        nonce = next(a.split("=", 1)[1] for a in cmd if a.startswith("junit_suite_name="))
+        (cwd / path).write_text(xml.replace("{nonce}", nonce), encoding="utf-8")
+        return code, "1 passed"
+
+    return execute
+
+
+def suite(cases: str, tests: int, name: str = "{nonce}", failures: int = 0) -> str:
+    return (
+        f'<testsuites><testsuite name="{name}" tests="{tests}" failures="{failures}" '
+        f'errors="0" skipped="0">{cases}</testsuite></testsuites>'
+    )
+
+
+OK_CASE = '<testcase classname="tests.test_demo_counts" name="test_counts" />'
+
+
+@pytest.mark.parametrize(
+    ("xml", "problem"),
+    [
+        (suite(OK_CASE, 1, name="an-earlier-run"), "not from this execution"),  # stale
+        ("<testsuites><testsuite", "malformed"),
+        ("<testsuites />", "no test suite"),
+        (suite("", 0), "lists no tests"),
+        (suite(OK_CASE, 3), "incomplete"),
+        (suite(OK_CASE.replace("test_demo_counts", "test_other"), 1), "no passing test belongs"),
+        (
+            suite(OK_CASE.replace(" />", "><failure message='x' /></testcase>"), 1, failures=1),
+            "failures or errors",
+        ),
+        (suite(OK_CASE.replace(" />", "><skipped /></testcase>"), 1), "no passing test belongs"),
+        (suite(OK_CASE, 1, failures=2), "failures or errors"),  # counts that contradict cases
+        (suite(OK_CASE, 1).replace('tests="1"', 'tests="one"'), "non-numeric"),
+    ],
+)
+def test_bad_reports_are_rejected_even_with_a_zero_exit(
+    tmp_path: Path, xml: str, problem: str
+) -> None:
+    tree = candidate_tree(tmp_path, "")
+    res = gate.run_criterion(PYTEST, config.load(), tree, forging(xml))
+    assert res["status"] == "fail"
+    assert any(problem in p for p in res["report"]["problems"]), res["report"]
+
+
+def test_a_well_formed_fresh_report_passes(tmp_path: Path) -> None:
+    res = gate.run_criterion(PYTEST, config.load(), candidate_tree(tmp_path, ""), forging(
+        suite(OK_CASE, 1)))  # fmt: skip
+    assert res["status"] == "pass"
+
+
+def test_a_report_never_rescues_a_non_zero_exit(tmp_path: Path) -> None:
+    res = gate.run_criterion(
+        PYTEST, config.load(), candidate_tree(tmp_path, ""), forging(suite(OK_CASE, 1), code=1)
+    )
+    assert res["status"] == "fail"
+
+
+def test_a_candidate_supplied_report_is_never_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = candidate_tree(tmp_path, "")
+    # reports the candidate shipped in its tree, valid in every way but freshness
+    for guess in ("0" * 24, "deadbeef"):
+        (tree / f".acp-junit-{guess}.xml").write_text(suite(OK_CASE, 1, name=guess))
+    res = gate.run_criterion(PYTEST, config.load(), tree, lambda cmd, cwd: (0, "1 passed"))
+    assert res["status"] == "fail"
+    assert "no test report" in res["report"]["problems"][0]
+    # and even a correctly guessed path is refused before anything runs
+    monkeypatch.setattr("scripts.harness.gate.secrets.token_hex", lambda n: "0" * 24)
+    ran: list[list[str]] = []
+
+    def execute(cmd: list[str], cwd: Path) -> tuple[int, str]:
+        ran.append(cmd)
+        return 0, ""
+
+    res = gate.run_criterion(PYTEST, config.load(), tree, execute)
+    assert res["status"] == "fail" and ran == []
+
+
+@pytest.mark.parametrize(
+    ("target", "classname", "name", "matches"),
+    [
+        ("tests/test_x.py", "tests.test_x", "test_a", True),
+        ("tests/test_x.py", "tests.test_x.TestCls", "test_a", True),
+        ("tests/test_x.py::test_a", "tests.test_x", "test_a[1-2]", True),
+        ("tests/test_x.py::test_a", "tests.test_x", "test_ab", False),
+        ("tests/test_x.py::TestCls::test_a", "tests.test_x.TestCls", "test_a", True),
+        ("tests/test_x.py", "tests.test_xy", "test_a", False),
+    ],
+)
+def test_only_tests_from_the_requested_file_or_node_count(
+    tmp_path: Path, target: str, classname: str, name: str, matches: bool
+) -> None:
+    report = tmp_path / "r.xml"
+    report.write_text(suite(f'<testcase classname="{classname}" name="{name}" />', 1, name="n"))
+    problems, counts = gate.junit_problems(report, "n", target)
+    assert (counts["matched"] == 1) is matches
+    assert (problems == []) is matches
+
+
+# manual acceptance criteria
+
+
+def test_manual_criteria_are_numbered_from_the_approved_contract() -> None:
+    assert [mid for mid, _ in MANUAL] == ["M1", "M2", "M3"]
+    assert MANUAL[0][1].startswith("expected values are literals")
+
+
+def test_the_reviewer_cannot_silently_omit_a_manual_criterion() -> None:
+    dropped = GOOD | {"manual_criteria": GOOD["manual_criteria"][:1]}
+    assert pilot.review_problems(dropped, MANUAL) == [
+        "reviewer omitted manual criterion M2",
+        "reviewer omitted manual criterion M3",
+    ]
+    by_text = GOOD | {
+        "manual_criteria": [
+            {"criterion": text, "status": "met", "evidence": "x"} for _, text in MANUAL
+        ]
+    }
+    assert pilot.review_problems(by_text, MANUAL) == []
+
+
+def test_review_lists_the_contracts_manual_criteria_and_refuses_an_omission(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ev, expected, gh, run = review_setup(
+        env, monkeypatch, GOOD | {"manual_criteria": GOOD["manual_criteria"][:2]}
+    )
+    out = env["tmp"] / "r"
+    res = pilot.review(run, env["root"], env["cfg"], gh, CONTRACT, ev, expected, out)
+    prompt = (out / "reviewer-prompt.md").read_text(encoding="utf-8")
+    for mid, text in MANUAL:
+        assert f"{mid}: {text}" in prompt
+    assert res["accepted"] is False
+    assert "reviewer omitted manual criterion M3" in res["problems"]
+
+
+def test_the_verdict_lists_every_manual_criterion_even_if_the_review_omitted_one(
+    tmp_path: Path,
+) -> None:
+    partial = GOOD | {"manual_criteria": GOOD["manual_criteria"][:2]}
+    review = {"accepted": True, "problems": [], "verdict": partial,
+              "engine_invoked": True, "engine_complete": True}  # fmt: skip
+    ev, expected = evidence(tmp_path, **{"review.json": review})
+    result = pilot.verdict(ev, expected)
+    assert [m["id"] for m in result["manual_criteria_for_human"]] == ["M1", "M2", "M3"]
+    assert {m["status"] for m in result["manual_criteria_for_human"]} == {"pending"}
+    assert result["manual_criteria_for_human"][2]["reviewer"] == "omitted"
+    assert result["ready_for_human"] is False
+    assert "reviewer omitted manual criterion M3" in result["problems"]

@@ -32,12 +32,14 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 from scripts.harness import config, contract, sandbox, scope
 
@@ -82,20 +84,93 @@ def run_criterion(
     if c.kind == "verify":
         cmd = list(cfg.verify_command)
         label = "verify"
+        report = None
     else:
-        # exit 5 means nothing collected, which fails here: a test that does not
-        # exist has not passed
-        cmd = ["python", "-m", "pytest", c.arg, "-q", "--no-header"]
+        # A zero exit alone proves nothing: a module calling os._exit(0) at import
+        # exits 0 with nothing run. So pytest must also leave a JUnit report under
+        # a name chosen now, after the candidate was fixed, naming the same nonce.
+        nonce = secrets.token_hex(12)
+        report = cwd / f".acp-junit-{nonce}.xml"
+        cmd = ["python", "-m", "pytest", c.arg, "-q", "--no-header", "-p", "no:cacheprovider",
+               f"--junitxml={report.name}", "-o", "junit_family=xunit2",
+               "-o", f"junit_suite_name={nonce}"]  # fmt: skip
         label = f"pytest {c.arg}"
     if execute is None:
         return {"criterion": label, "status": "fail", "exit_code": None, "tail": ["no sandbox"]}
+    if report is not None and (report.exists() or report.is_symlink()):
+        return {"criterion": label, "status": "fail", "exit_code": None,
+                "tail": ["a report already exists at the fresh report path"]}  # fmt: skip
     code, output = execute(cmd, cwd)
-    return {
+    result: dict[str, Any] = {
         "criterion": label,
         "status": "pass" if code == 0 else "fail",
         "exit_code": code,
         "tail": output.splitlines()[-15:],
     }
+    if report is not None:
+        problems, counts = junit_problems(report, nonce, c.arg)
+        report.unlink(missing_ok=True)
+        result["report"] = {"problems": problems, **counts}
+        if problems:
+            result["status"] = "fail"
+    return result
+
+
+def _test_id(target: str) -> str:
+    """`tests/test_x.py::Cls::test_a` -> `tests.test_x.Cls.test_a`, as JUnit names it."""
+    path, _, rest = target.partition("::")
+    module = path.removesuffix(".py").replace("/", ".")
+    return ".".join([module, *[p for p in rest.split("::") if p]])
+
+
+def junit_problems(report: Path, nonce: str, target: str) -> tuple[list[str], dict[str, int]]:
+    """Why this report doesn't show a real, complete, passing run of `target`.
+
+    Evidence of integrity, not proof: candidate code runs in the same process as
+    pytest and could, in principle, write a convincing report itself."""
+    counts = {"passed": 0, "matched": 0, "failed": 0, "skipped": 0}
+    if report.is_symlink() or not report.is_file():
+        return ["no test report: the run ended before pytest finished"], counts
+    if report.stat().st_size > 5_000_000:
+        return ["test report is implausibly large"], counts
+    try:
+        root = ElementTree.fromstring(report.read_bytes())
+    except ElementTree.ParseError:
+        return ["test report is malformed"], counts
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+    if root.tag not in ("testsuite", "testsuites") or not suites:
+        return ["test report has no test suite"], counts
+    if any(s.get("name") != nonce for s in suites):
+        return ["test report is not from this execution"], counts
+
+    problems: list[str] = []
+    want = _test_id(target)
+    cases = [case for s in suites for case in s.iter("testcase")]
+    try:
+        declared = sum(int(s.get("tests", "-1")) for s in suites)
+        declared_bad = sum(int(s.get("failures", "0")) + int(s.get("errors", "0")) for s in suites)
+    except ValueError:
+        return ["test report has non-numeric counts"], counts
+    if declared != len(cases):
+        problems.append("test report is incomplete: declared and listed tests differ")
+    for case in cases:
+        tags = {child.tag for child in case}
+        if tags & {"failure", "error"}:
+            counts["failed"] += 1
+        elif "skipped" in tags:
+            counts["skipped"] += 1
+        else:
+            counts["passed"] += 1
+            full = f"{case.get('classname', '')}.{case.get('name', '').split('[')[0]}"
+            if full == want or full.startswith(want + "."):
+                counts["matched"] += 1
+    if counts["failed"] or declared_bad:
+        problems.append("test report records failures or errors")
+    if not cases:
+        problems.append("test report lists no tests")
+    elif not counts["matched"]:
+        problems.append(f"no passing test belongs to {target}")
+    return problems, counts
 
 
 def secret_hits(root: Path, base: str, tip: str) -> list[dict[str, str]]:

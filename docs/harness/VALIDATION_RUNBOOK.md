@@ -122,16 +122,18 @@ order, one at a time:
    git push origin --delete pilot-drill/<issue>
    ```
 
-Fake costs are `0.0` unless stated. Every expected verdict names the one
-problem it should contain. **Any extra problem is a deviation.**
+Fake costs are `0.0` unless stated. **Judge outcomes, not wording:** statuses,
+booleans, which jobs ran, which artifacts exist, and ledger records. Quoted
+messages show what to look for. A different wording isn't a deviation; a
+different outcome, or an extra kind of problem, is.
 
 ### P0: positive control (full pipeline)
 
 | | |
 |---|---|
 | Implementer | writes a lint-clean, passing `tests/test_demo_counts.py`; `cost_usd 0.0` |
-| Reviewer | `approve`, no blockers, security findings `resolved`, the three manual criteria `unresolved` ("fake engine: not judged") |
-| Expected | all seven jobs succeed. `agent.status = committed`; `check.ok`; criteria `ok`, with `trusted_baseline` pass and both candidate criteria pass; `review.accepted`. Verdict `ready_for_human: true`, `spent_usd 0.0`, `costs_known true`, `over_budget false`, three manual criteria listed for the human |
+| Reviewer | `approve`, no blockers, security findings `resolved`, one `manual_criteria` entry each for `M1`, `M2` and `M3`, all `unresolved` ("fake engine: not judged") |
+| Expected | all seven jobs succeed. `agent.status = committed`; `check.ok`; criteria `ok`, with `trusted_baseline` pass and both candidate criteria pass (the pytest one with a valid fresh report); `review.accepted`. Verdict `ready_for_human: true`, `spent_usd 0.0`, `costs_known true`, `over_budget false`, `manual_criteria_for_human` lists M1–M3 from the contract, all `pending` |
 | Evidence | the bundle sha256 is equal in `agent`, `check` and `criteria`. The ledger shows one `reserve` and one `account` (`0.0`/`0.0`) |
 | Stop if | any job fails or is skipped, any digest disagrees, or the container or criteria fail for an environmental reason. **Fix before any negative drill:** a negative drill only means something if the positive path works |
 | Then | **do not publish.** Optionally rehearse `docs/HARNESS.md` step E up to `git log`, without pushing `agent/<n>` |
@@ -167,9 +169,10 @@ problem it should contain. **Any extra problem is a deviation.**
 | | |
 |---|---|
 | Implementer | `tests/test_demo_counts.py` containing only `import os` / `os._exit(0)` |
-| Known gap (found while preparing this runbook) | pytest exits 0 when a test module calls `os._exit(0)` at import, so today **both candidate criteria would report `pass` with nothing run**. The trusted baseline doesn't help, because the baseline restores the base's `tests/`. Only the reviewer and the human manual criteria stand in the way |
-| Expected | **after a fix is approved and merged** (for example, requiring the pytest criterion to report at least one passed test): criteria `fail`, verdict not ready: `criteria did not pass`. Without a fix, the drill would end `ready_for_human: true` behind a fake approving reviewer, so it isn't run until that decision is made |
-| Stop if | criteria pass |
+| Reviewer | `approve` (it must never be reached) |
+| Expected | criteria `ok: false`. In `criteria.json`, the `pytest tests/test_demo_counts.py` entry has `status: fail` with `exit_code: 0`: pytest exited cleanly, yet no fresh report was produced. Its `report.problems` is non-empty. `review` is skipped. The verdict is not ready, and its problems include the criteria failure |
+| Check | the outcome, not the wording: `status`, `exit_code` and a non-empty `report.problems`. Diagnostic text may change |
+| Stop if | that criterion passes, or the verdict is `ready_for_human: true` |
 
 ### D7: duplicate dispatch (re-uses P0's issue after P0 finishes)
 
@@ -237,6 +240,5 @@ Stop, report, and don't continue to P1 if any of these happens:
 - any job requests `acp-agent`, or holds a token or secret beyond `docs/HARNESS.md`;
 - a negative drill unexpectedly ends `ready_for_human: true`.
 
-**Done when** P0 and D1, D3, D4, D7, D8 and D9 all match, and D5 matches once its
-gap is decided. Then, as separate approvals: the Console workspace and key,
+**Done when** P0 and D1, D3, D4, D5, D7, D8 and D9 all match. Then, as separate approvals: the Console workspace and key,
 `acp-agent`, and P1 per `docs/HARNESS.md` §D.

@@ -20,7 +20,7 @@ Obtained by running `./scripts/verify.sh`:
 | `ruff format --check .` | clean |
 | `ruff check .` | clean |
 | `mypy --strict` (src + tests + scripts) | clean, 65 files |
-| `pytest --cov` | **718 passed**, **97.62%** coverage (floor 96%) |
+| `pytest --cov` | **745 passed**, **97.62%** coverage (floor 96%) |
 | Demo seed from committed fixtures | 166 events, 20 violations |
 | CLI smoke (`stats`/`runs`/`violations`/`trace`/`evaluate`) | clean |
 
@@ -127,8 +127,8 @@ Accurate as of the date above. None of these are bugs; all are deliberate stops.
    harness tests. Coverage measures only the package, so the figure is
    unchanged.
 8. *This change:* pilot runner (PR #2), implemented on `feat/pilot-runner`,
-   never run live (`docs/HARNESS.md`, "Pilot runner"). 127 new tests: 303 of
-   the 718 are harness tests (85% harness coverage, measured separately).
+   never run live (`docs/HARNESS.md`, "Pilot runner"). 154 new tests: 330 of
+   the 745 are harness tests (86% harness coverage, measured separately).
 
 ## Branches
 
